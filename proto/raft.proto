@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package raft;
+
+enum EntryType {
+  CONFIGURATION = 0; // Configuration change
+  DATA = 1;          // Data
+  NOOP = 2;          // No operation
+}
+
+message LogEntry {
+  uint64 term = 1;          // term of the leader
+  uint64 index = 2;         // index of the log entry
+  EntryType entry_type = 3; // type of the log entry
+  bytes data = 4;           // data
+}
+
+message AppendEntriesRequest {
+  uint64 term = 1; // leader's term
+  uint64 leader_id = 2; // leader's id
+  uint64 prev_log_term = 3; // term of the log entry immediately preceding the new log entry
+  uint64 prev_log_index = 4; // index of the log entry immediately preceding the new log entry
+  repeated LogEntry entries = 5; // log entries to store (empty for heartbeat)
+  uint64 leader_commit = 6; // leader's commit index
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1; // current term of the follower
+  bool success = 2; // true if follower contained entry matching prevLogIndex and prevLogTerm
+}
+
+message RequestVoteRequest {
+  uint64 term = 1; // candidate's term
+  bool vote_granted = 2; // true if candidate received vote
+}
+
+enum SnapshotDataType {
+  METADATA = 0; // metadata of the snapshot
+  SNAPSHOT = 1; // snapshot data
+}
+
+message InstallSnapshotRequest {
+  uint64 term = 1; // term of the leader
+  uint64 leader_id = 2; // leader's id
+  uint64 last_included_index = 3; // index of the last log entry included in the snapshot
+  uint64 last_included_term = 4; // term of the last log entry included in the snapshot
+  uint64 offset = 5; // offset of the snapshot data
+  bytes data = 6; // snapshot data
+  SnapshotDataType type = 7; // type of the snapshot data
+  bool done = 8; // true if this is the last chunk of the snapshot
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1; // current term, for leader to update itself
+}
+
+message Server {
+  uint64 server_id = 1;
+  string server_addr = 2;
+}
+
+message GetLeaderRequest {
+}
+
+message GetLeaderResponse {
+  Server leader = 1;
+}
+
+message GetConfigurationRequest {
+}
+
+message GetConfigurationResponse {
+  repeated Server servers = 1;
+}
+
+message SetConfigurationRequest {
+  repeated Server servers = 1;
+}
+
+message SetConfigurationResponse {
+  bool success = 1;
+}
+
+// The rpc service for raft consensus
+service ConsensusRpc {
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);        // Append log entries RPC
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteRequest);               // Request vote RPC
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);  // Install snapshot RPC
+}
+
+// The rpc service for raft management
+service ManagementRpc {
+  rpc GetLeader(GetLeaderRequest) returns (GetLeaderResponse);                      // Get the cluster leader
+  rpc GetConfiguration(GetConfigurationRequest) returns (GetConfigurationResponse); // Get the cluster configuration
+  rpc SetConfiguration(SetConfigurationRequest) returns (SetConfigurationResponse); // Set the cluster configuration
+}
