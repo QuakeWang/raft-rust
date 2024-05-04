@@ -15,9 +15,7 @@ pub struct PeerManager {
 
 impl PeerManager {
     pub fn new() -> Self {
-        Self {
-            peers: Vec::new(),
-        }
+        Self { peers: Vec::new() }
     }
 
     pub fn add_peers(&mut self, peers: Vec<Peer>) {

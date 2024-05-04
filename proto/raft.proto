@@ -30,8 +30,15 @@ message AppendEntriesResponse {
 }
 
 message RequestVoteRequest {
-  uint64 term = 1; // candidate's term
-  bool vote_granted = 2; // true if candidate received vote
+  uint64 term = 1; // leader's term
+  uint64 candidate_id = 2; // candidate's id
+  uint64 last_log_term = 3; // term of the last log entry
+  uint64 last_log_index = 4; // index of the last log entr
+}
+
+message RequestVoteResponse {
+  uint64 term = 1; // current term of the follower
+  bool vote_granted = 2; // true if follower granted vote
 }
 
 enum SnapshotDataType {
@@ -84,7 +91,7 @@ message SetConfigurationResponse {
 // The rpc service for raft consensus
 service ConsensusRpc {
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);        // Append log entries RPC
-  rpc RequestVote(RequestVoteRequest) returns (RequestVoteRequest);               // Request vote RPC
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);               // Request vote RPC
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);  // Install snapshot RPC
 }
 

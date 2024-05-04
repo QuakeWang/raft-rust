@@ -1,7 +1,7 @@
 use log::info;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{sleep, JoinHandle};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 // Timer internal thread checking interval
@@ -102,6 +102,7 @@ impl Timer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
     #[test]
     fn test_timer() {
