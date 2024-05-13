@@ -33,7 +33,7 @@ message RequestVoteRequest {
   uint64 term = 1; // leader's term
   uint64 candidate_id = 2; // candidate's id
   uint64 last_log_term = 3; // term of the last log entry
-  uint64 last_log_index = 4; // index of the last log entr
+  uint64 last_log_index = 4; // index of the last log entry
 }
 
 message RequestVoteResponse {

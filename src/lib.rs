@@ -1,3 +1,4 @@
+pub mod consensus;
 mod log;
 mod peer;
 pub mod proto;
