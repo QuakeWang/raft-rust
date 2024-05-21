@@ -1,11 +1,24 @@
 #[derive(Debug)]
-struct Peer {
+pub struct Peer {
     server_id: u64,
-    server_addr: String,
-    next_index: u64,
+    pub(crate) server_addr: String,
+    pub(crate) next_index: u64,
     match_index: u64,
     vote_granted: bool,
     is_leader: bool,
+}
+
+impl Peer {
+    pub fn new(server_id: u64, server_addr: String) -> Self {
+        Self {
+            server_id,
+            server_addr,
+            next_index: 1,
+            match_index: 0,
+            vote_granted: false,
+            is_leader: false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -22,11 +35,11 @@ impl PeerManager {
         self.peers.extend(peers);
     }
 
-    pub fn get_peers(&self) -> Vec<&Peer> {
+    pub fn peers(&self) -> Vec<&Peer> {
         self.peers.iter().collect()
     }
 
-    pub fn get_leader(&self) -> Option<&Peer> {
+    pub fn leader(&self) -> Option<&Peer> {
         for peer in self.peers.iter() {
             if peer.is_leader {
                 return Some(peer);
@@ -61,7 +74,7 @@ mod tests {
         };
         peer_manager.add_peers(vec![peer1, peer2]);
         println!("{:?}", peer_manager);
-        assert_eq!(peer_manager.get_peers().len(), 2);
-        assert_eq!(peer_manager.get_leader().unwrap().server_id, 1);
+        assert_eq!(peer_manager.peers().len(), 2);
+        assert_eq!(peer_manager.leader().unwrap().server_id, 1);
     }
 }

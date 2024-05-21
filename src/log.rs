@@ -18,7 +18,7 @@ impl Log {
         self.entries.extend(entries);
     }
 
-    pub fn get_entries(&self) -> &Vec<proto::LogEntry> {
+    pub fn entries(&self) -> &Vec<proto::LogEntry> {
         &self.entries
     }
 
@@ -26,15 +26,15 @@ impl Log {
         self.entries.get(index as usize)
     }
 
-    pub fn get_start_index(&self) -> u64 {
+    pub fn start_index(&self) -> u64 {
         self.start_index
     }
 
-    pub fn get_last_index(&self) -> u64 {
+    pub fn last_index(&self) -> u64 {
         self.start_index + self.entries.len() as u64 - 1
     }
 
-    pub fn get_last_term(&self) -> u64 {
+    pub fn last_term(&self) -> u64 {
         self.entries.last().unwrap().term
     }
 }
@@ -62,10 +62,10 @@ mod tests {
         };
         log.append_entries(vec![entry2]);
 
-        assert_eq!(log.get_entries().len(), 2);
-        assert_eq!(log.get_start_index(), 1);
+        assert_eq!(log.entries().len(), 2);
+        assert_eq!(log.start_index(), 1);
         assert_eq!(log.get_entry(1).unwrap().index, 2);
-        assert_eq!(log.get_last_index(), 2);
-        assert_eq!(log.get_last_term(), 1);
+        assert_eq!(log.last_index(), 2);
+        assert_eq!(log.last_term(), 1);
     }
 }
