@@ -72,7 +72,7 @@ impl Consensus {
         };
 
         // Save the log entry
-        self.log.append_entries(vec![log_entry]);
+        self.log.append(self.current_term, vec![(proto::EntryType::Data, data.as_bytes().to_vec())]);
 
         // TODO: Send the log entry to other peers
         self.append_entries();
