@@ -5,7 +5,6 @@ pub struct Peer {
     pub(crate) next_index: u64,
     match_index: u64,
     vote_granted: bool,
-    is_leader: bool,
 }
 
 impl Peer {
@@ -16,7 +15,6 @@ impl Peer {
             next_index: 1,
             match_index: 0,
             vote_granted: false,
-            is_leader: false,
         }
     }
 }
@@ -38,15 +36,6 @@ impl PeerManager {
     pub fn peers(&self) -> Vec<&Peer> {
         self.peers.iter().collect()
     }
-
-    pub fn leader(&self) -> Option<&Peer> {
-        for peer in self.peers.iter() {
-            if peer.is_leader {
-                return Some(peer);
-            }
-        }
-        None
-    }
 }
 
 #[cfg(test)]
@@ -62,7 +51,6 @@ mod tests {
             next_index: 3,
             match_index: 2,
             vote_granted: false,
-            is_leader: true,
         };
         let peer2 = Peer {
             server_id: 2,
@@ -70,11 +58,9 @@ mod tests {
             next_index: 2,
             match_index: 2,
             vote_granted: false,
-            is_leader: false,
         };
         peer_manager.add_peers(vec![peer1, peer2]);
         println!("{:?}", peer_manager);
         assert_eq!(peer_manager.peers().len(), 2);
-        assert_eq!(peer_manager.leader().unwrap().server_id, 1);
     }
 }

@@ -6,7 +6,7 @@ use crate::proto::{
 };
 use crate::rpc::Client;
 use crate::timer::Timer;
-use crate::{proto, rpc, util};
+use crate::{config, proto, rpc, util};
 use log::{error, info};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,6 +31,7 @@ pub struct Consensus {
     voted_for: u64,
     commit_index: u64,
     last_applied: u64,
+    leader_id: u64,
     peer_manager: PeerManager,
     log: Log,
     rpc_client: Client,
@@ -48,9 +49,10 @@ impl Consensus {
             election_timer: Arc::new(Mutex::new(Timer::new("election"))),
             heartbeat_timer: Arc::new(Mutex::new(Timer::new("heartbeat"))),
             snapshot_timer: Arc::new(Mutex::new(Timer::new("snapshot"))),
-            voted_for: 0,
+            voted_for: config::NONE_SERVER_ID,
             commit_index: 0,
             last_applied: 0,
+            leader_id: config::NONE_SERVER_ID,
             peer_manager: PeerManager::new(),
             log: Log::new(1),
             rpc_client: Client {},
@@ -61,21 +63,25 @@ impl Consensus {
         Arc::new(Mutex::new(consensus))
     }
 
-    pub fn replicate(&mut self, data: String) {
+    pub fn replicate(&mut self, data: String) -> Result<(), Box<dyn std::error::Error>> {
+        if self.state != State::Leader {
+            error!("Replicate should be processed by leader!");
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Not leader!",
+            )));
+        }
         info!("Replicate data: {}", &data);
 
-        let log_entry = LogEntry {
-            term: self.current_term,
-            index: self.log.last_index() + 1,
-            r#entry_type: proto::EntryType::Data.into(),
-            data: data.as_bytes().to_vec(),
-        };
-
         // Save the log entry
-        self.log.append(self.current_term, vec![(proto::EntryType::Data, data.as_bytes().to_vec())]);
+        self.log.append(
+            self.current_term,
+            vec![(proto::EntryType::Data, data.as_bytes().to_vec())],
+        );
 
         // TODO: Send the log entry to other peers
         self.append_entries();
+        Ok(())
     }
 
     // Append the log to other nodes
@@ -88,11 +94,12 @@ impl Consensus {
 
         let mut peers = self.peer_manager.peers();
         for peer in peers.iter() {
+            let prev_log = self.log.prev_entry(self.log.last_index()).unwrap();
             let request = AppendEntriesRequest {
                 term: self.current_term,
                 leader_id: self.server_id,
-                prev_log_term: peer.next_index - 1,
-                prev_log_index: 0,
+                prev_log_term: prev_log.index,
+                prev_log_index: prev_log.term,
                 entries: vec![],
                 leader_commit: self.commit_index,
             };
@@ -157,8 +164,45 @@ impl Consensus {
         todo!()
     }
 
-    fn step_down(&mut self) {
-        todo!()
+    // Step down to state
+    fn step_down(&mut self, new_term: u64) {
+        info!(
+            "Step down to term: {}, current term: {}.",
+            new_term, self.current_term
+        );
+        if new_term < self.current_term {
+            error!(
+                "Step down failed because new term {} is smaller than current term {}.",
+                new_term, self.current_term
+            );
+            return;
+        }
+        if new_term > self.current_term {
+            self.state = State::Follower;
+            self.current_term = new_term;
+            self.voted_for = config::NONE_SERVER_ID;
+            self.leader_id = config::NONE_SERVER_ID;
+        } else {
+            // If the leader get the same term, then become follower
+            self.state = State::Follower;
+        }
+
+        // Reset the election timer
+        self.election_timer
+            .lock()
+            .unwrap()
+            .reset(util::rand_election_timeout());
+    }
+
+    // Election for leader
+    fn become_leader(&mut self) {
+        if self.state != State::Candidate {
+            error!("Become leader failed because state is not candidate!");
+            return;
+        }
+        self.state = State::Leader;
+        self.leader_id = self.server_id;
+        self.append_entries();
     }
 
     // Term update
@@ -221,24 +265,32 @@ impl Consensus {
         &mut self,
         request: &AppendEntriesRequest,
     ) -> AppendEntriesResponse {
-        info!("Handle append entries");
+        let refuse_resp = AppendEntriesResponse {
+            term: self.current_term,
+            success: false,
+        };
+
+        if request.term < self.current_term {
+            return refuse_resp;
+        }
+        self.step_down(request.term);
+
         match self.state {
-            State::Follower => {
-                self.election_timer
-                    .lock()
-                    .unwrap()
-                    .reset(util::rand_election_timeout());
-            }
+            State::Follower => {}
             State::Candidate => {
-                self.state = State::Follower;
-                self.election_timer
-                    .lock()
-                    .unwrap()
-                    .reset(util::rand_election_timeout());
+                panic!(
+                    "Candidate {} received append entries from {}",
+                    self.server_id, request.leader_id
+                );
             }
-            State::Leader => {}
+            State::Leader => {
+                panic!(
+                    "Leader {} received append entries from {}",
+                    self.server_id, request.leader_id
+                );
+            }
             _ => {
-                error!("Invalid state {:?}", self.state)
+                error!("");
             }
         }
         let reply = AppendEntriesResponse {
@@ -248,11 +300,11 @@ impl Consensus {
         reply
     }
 
-    pub fn handle_request_vote(
-        &mut self,
-        request: &proto::RequestVoteRequest,
-    ) -> RequestVoteResponse {
-        info!("Handle request vote");
+    pub fn handle_request_vote(&mut self, request: &RequestVoteRequest) -> RequestVoteResponse {
+        if request.term > self.current_term {
+            self.step_down(request.term);
+        }
+
         let refuse_reply = RequestVoteResponse {
             term: self.current_term,
             vote_granted: false,
@@ -272,7 +324,7 @@ impl Consensus {
                 return refuse_reply;
             }
 
-            if self.voted_for != 0 && self.voted_for != request.candidate_id {
+            if self.voted_for != config::NONE_SERVER_ID && self.voted_for != request.candidate_id {
                 info!(
                     "Refuse vote for {} due to self has already voted for {}.",
                     request.candidate_id, self.voted_for
@@ -300,7 +352,7 @@ impl Consensus {
         &mut self,
         request: InstallSnapshotRequest,
     ) -> InstallSnapshotResponse {
-        println!("handle install snapshot");
+        info!("handle install snapshot");
         let reply = InstallSnapshotResponse { term: 1 };
         reply
     }

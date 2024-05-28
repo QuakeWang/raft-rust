@@ -5,7 +5,5 @@ fn main() {
         raft_rust::peer::Peer::new(3, "http://[::1]:9093".to_string()),
     ];
     let consensus = raft_rust::start(1, 9091, peers);
-    loop {
-
-    }
+    loop {}
 }

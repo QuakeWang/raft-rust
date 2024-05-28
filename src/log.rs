@@ -1,10 +1,10 @@
-use std::sync::Mutex;
+use crate::proto;
 use lazy_static::lazy_static;
 use log::error;
-use crate::proto;
+use std::sync::Mutex;
 
 lazy_static::lazy_static! {
-    static ref LOG_ENTRY_BEFORE_THE_FIRST_ENTRY: proto::LogEntry = proto::LogEntry {
+    static ref VIRTUAL_LOG_ENTRY: proto::LogEntry = proto::LogEntry {
         index: 0,
         term: 0,
         r#entry_type: proto::EntryType::Noop.into(),
@@ -61,7 +61,7 @@ impl Log {
 
     pub fn prev_entry(&self, index: u64) -> Option<&proto::LogEntry> {
         if index < self.start_index {
-            return Some(&LOG_ENTRY_BEFORE_THE_FIRST_ENTRY);
+            return Some(&VIRTUAL_LOG_ENTRY);
         }
         self.entries.get((index - self.start_index - 1) as usize)
     }
@@ -71,7 +71,10 @@ impl Log {
     }
 
     pub fn last_index(&self) -> u64 {
-        self.entries.last().map(|entry| entry.index).unwrap_or(self.start_index - 1)
+        self.entries
+            .last()
+            .map(|entry| entry.index)
+            .unwrap_or(self.start_index - 1)
     }
 
     pub fn last_term(&self) -> u64 {
@@ -86,9 +89,15 @@ mod tests {
         let mut log = super::Log::new(1);
         assert_eq!(log.prev_entry(log.last_index()).unwrap().index, 0);
 
-        log.append(1, vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())]);
+        log.append(
+            1,
+            vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],
+        );
 
-        log.append(1, vec![(super::proto::EntryType::Data, "test2".as_bytes().to_vec())]);
+        log.append(
+            1,
+            vec![(super::proto::EntryType::Data, "test2".as_bytes().to_vec())],
+        );
 
         println!("{:?}", log);
         assert_eq!(log.entries().len(), 2);

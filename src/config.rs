@@ -9,3 +9,6 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(3000);
 
 // Snapshot interval
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(30000);
+
+// None server id
+pub const NONE_SERVER_ID: u64 = 0;
