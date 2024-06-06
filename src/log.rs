@@ -1,5 +1,4 @@
 use crate::proto;
-use lazy_static::lazy_static;
 use log::error;
 use std::sync::Mutex;
 
@@ -54,16 +53,9 @@ impl Log {
 
     pub fn entry(&self, index: u64) -> Option<&proto::LogEntry> {
         if index < self.start_index {
-            return None;
-        }
-        self.entries.get((index - self.start_index) as usize)
-    }
-
-    pub fn prev_entry(&self, index: u64) -> Option<&proto::LogEntry> {
-        if index < self.start_index {
             return Some(&VIRTUAL_LOG_ENTRY);
         }
-        self.entries.get((index - self.start_index - 1) as usize)
+        self.entries.get((index - self.start_index) as usize)
     }
 
     pub fn start_index(&self) -> u64 {
@@ -87,8 +79,6 @@ mod tests {
     #[test]
     fn test_log() {
         let mut log = super::Log::new(1);
-        assert_eq!(log.prev_entry(log.last_index()).unwrap().index, 0);
-
         log.append(
             1,
             vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],
