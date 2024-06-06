@@ -1,5 +1,5 @@
 use crate::log::Log;
-use crate::peer::{Peer, PeerManager};
+use crate::peer::{self, Peer, PeerManager};
 use crate::proto::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     RequestVoteRequest, RequestVoteResponse,
@@ -30,7 +30,7 @@ pub struct Consensus {
     commit_index: u64,
     last_applied: u64,
     leader_id: u64,
-    peer_manager: Arc<Mutex<PeerManager>>,
+    peer_manager: PeerManager,
     log: Log,
     rpc_client: Client,
     tokio_runtime: tokio::runtime::Runtime,
@@ -51,13 +51,13 @@ impl Consensus {
             commit_index: 0,
             last_applied: 0,
             leader_id: config::NONE_SERVER_ID,
-            peer_manager: Arc::new(Mutex::new(PeerManager::new())),
+            peer_manager: PeerManager::new(),
             log: Log::new(1),
             rpc_client: Client {},
             tokio_runtime,
         };
 
-        consensus.peer_manager.lock().unwrap().add_peers(peers);
+        consensus.peer_manager.add_peers(peers);
         Arc::new(Mutex::new(consensus))
     }
 
@@ -96,16 +96,16 @@ impl Consensus {
         }
 
         // TODO: Send the log entries to other peers in parallel.
-        let mut peer_manager = self.peer_manager.clone();
-        let mut peer_manager = peer_manager.lock().unwrap();
-        let mut peers = peer_manager.peers_mut();
-        for peer in peers.iter_mut() {
-            self.append_entries_to_peer(peer, heartbeat);
+        let peer_ids = self.peer_manager.peer_ids();
+        for peer_server_id in peer_ids.iter() {
+            self.append_entries_to_peer(peer_server_id.clone(), heartbeat);
         }
+
         true
     }
 
-    fn append_entries_to_peer(&mut self, peer: &mut Peer, heartbeat: bool) -> bool {
+    fn append_entries_to_peer(&mut self, peer_server_id: u64, heartbeat: bool) -> bool {
+        let peer = self.peer_manager.peer(peer_server_id).unwrap();
         let entries = match heartbeat {
             true => self.log.pack_entries(peer.next_index),
             false => Vec::new(),
@@ -152,17 +152,16 @@ impl Consensus {
                 }
                 false
             }
-        }
+        };
     }
 
     fn request_vote(&mut self) {
         info!("Start request vote");
         let mut vote_granted_count = 0;
 
-        let mut peer_manager = self.peer_manager.clone();
-        let mut peer_manager = peer_manager.lock().unwrap();
-        let mut peers = peer_manager.peers_mut();
-        for peer in peers.iter() {
+        let peer_ids = self.peer_manager.peer_ids();
+        for peer_server_id in peer_ids.iter() {
+            let peer = self.peer_manager.peer(peer_server_id.clone()).unwrap();
             info!("Request vote to {:?}.", &peer.server_addr);
             let request = RequestVoteRequest {
                 term: self.current_term,
@@ -194,7 +193,7 @@ impl Consensus {
                     vote_granted_count += 1;
                 }
 
-                if vote_granted_count + 1 > (peers.len() / 2) {
+                if vote_granted_count + 1 > (peer_ids.len() / 2) {
                     info!("Become leader.");
                     self.become_leader();
                     return;
@@ -255,11 +254,7 @@ impl Consensus {
     }
 
     fn advance_commit_index(&mut self) {
-        let new_commit_index = self
-            .peer_manager
-            .lock()
-            .unwrap()
-            .quorum_match_index(self.commit_index);
+        let new_commit_index = self.peer_manager.quorum_match_index(self.commit_index);
         if new_commit_index <= self.commit_index {
             return;
         }

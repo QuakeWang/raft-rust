@@ -37,8 +37,22 @@ impl PeerManager {
         self.peers.iter().collect()
     }
 
+    pub fn peer(&mut self, server_id: u64) -> Option<&mut Peer> {
+        self.peers
+            .iter_mut()
+            .find(|peer| peer.server_id == server_id)
+    }
+
     pub fn peers_mut(&mut self) -> &mut Vec<Peer> {
         &mut self.peers
+    }
+
+    pub fn peers_num(&self) -> usize {
+        self.peers.len()
+    }
+
+    pub fn peer_ids(&self) -> Vec<u64> {
+        self.peers.iter().map(|peer| peer.server_id).collect()
     }
 
     // Get the most match index
