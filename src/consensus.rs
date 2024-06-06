@@ -30,7 +30,7 @@ pub struct Consensus {
     commit_index: u64,
     last_applied: u64,
     leader_id: u64,
-    peer_manager: PeerManager,
+    peer_manager: Arc<Mutex<PeerManager>>,
     log: Log,
     rpc_client: Client,
     tokio_runtime: tokio::runtime::Runtime,
@@ -51,13 +51,13 @@ impl Consensus {
             commit_index: 0,
             last_applied: 0,
             leader_id: config::NONE_SERVER_ID,
-            peer_manager: PeerManager::new(),
+            peer_manager: Arc::new(Mutex::new(PeerManager::new())),
             log: Log::new(1),
             rpc_client: Client {},
             tokio_runtime,
         };
 
-        consensus.peer_manager.add_peers(peers);
+        consensus.peer_manager.lock().unwrap().add_peers(peers);
         Arc::new(Mutex::new(consensus))
     }
 
@@ -79,38 +79,78 @@ impl Consensus {
         self.log
             .append(self.current_term, vec![(r#type, data.as_bytes().to_vec())]);
 
-        // TODO: Send the log entry to other peers
+        // Send the log entry to other peers
         self.append_entries(false);
 
         Ok(())
     }
 
-    fn append_entries(&mut self, heartbeat: bool) {
+    fn append_entries(&mut self, heartbeat: bool) -> bool {
         // Check the current state
         if self.state != State::Leader {
             error!(
                 "The current state is {:?}, can not append entries.",
                 self.state
             );
-            return;
+            return false;
         }
 
-        let mut peers = self.peer_manager.peers();
-        for peer in peers.iter() {
-            let prev_log = self.log.entry(peer.next_index - 1).unwrap();
-            let request = AppendEntriesRequest {
-                term: self.current_term,
-                leader_id: self.leader_id,
-                prev_log_term: prev_log.term,
-                prev_log_index: prev_log.index,
-                entries: vec![],
-                leader_commit: self.commit_index,
-            };
-            if let Err(_) = self.tokio_runtime.block_on(
-                self.rpc_client
-                    .append_entries(request, peer.server_addr.clone()),
-            ) {
+        // TODO: Send the log entries to other peers in parallel.
+        let mut peer_manager = self.peer_manager.clone();
+        let mut peer_manager = peer_manager.lock().unwrap();
+        let mut peers = peer_manager.peers_mut();
+        for peer in peers.iter_mut() {
+            self.append_entries_to_peer(peer, heartbeat);
+        }
+        true
+    }
+
+    fn append_entries_to_peer(&mut self, peer: &mut Peer, heartbeat: bool) -> bool {
+        let entries = match heartbeat {
+            true => self.log.pack_entries(peer.next_index),
+            false => Vec::new(),
+        };
+
+        let entries_num = entries.len();
+
+        let prev_log_index = peer.next_index - 1;
+        let prev_log = self.log.entry(prev_log_index).unwrap();
+        let request = AppendEntriesRequest {
+            term: self.current_term,
+            leader_id: self.server_id,
+            prev_log_term: prev_log.term,
+            prev_log_index,
+            entries,
+            leader_commit: self.commit_index,
+        };
+
+        let response = match self.tokio_runtime.block_on(
+            self.rpc_client
+                .append_entries(request, peer.server_addr.clone()),
+        ) {
+            Ok(response) => response,
+            Err(_) => {
                 error!("Append entries to {} failed.", &peer.server_addr);
+                return false;
+            }
+        };
+
+        if response.term > self.current_term {
+            self.step_down(response.term);
+            return false;
+        }
+
+        return match response.success {
+            true => {
+                peer.match_index = prev_log_index + entries_num as u64;
+                peer.next_index = peer.match_index + 1;
+                true
+            }
+            false => {
+                if peer.next_index > 1 {
+                    peer.next_index -= 1;
+                }
+                false
             }
         }
     }
@@ -119,7 +159,9 @@ impl Consensus {
         info!("Start request vote");
         let mut vote_granted_count = 0;
 
-        let mut peers = self.peer_manager.peers();
+        let mut peer_manager = self.peer_manager.clone();
+        let mut peer_manager = peer_manager.lock().unwrap();
+        let mut peers = peer_manager.peers_mut();
         for peer in peers.iter() {
             info!("Request vote to {:?}.", &peer.server_addr);
             let request = RequestVoteRequest {
@@ -212,7 +254,21 @@ impl Consensus {
         }
     }
 
-    fn advance_commit_index(&mut self) {}
+    fn advance_commit_index(&mut self) {
+        let new_commit_index = self
+            .peer_manager
+            .lock()
+            .unwrap()
+            .quorum_match_index(self.commit_index);
+        if new_commit_index <= self.commit_index {
+            return;
+        }
+        info!(
+            "Advance commit index from {} to {}.",
+            self.commit_index, new_commit_index
+        );
+        self.commit_index = new_commit_index;
+    }
 
     pub fn handle_heartbeat_timeout(&mut self) {
         if self.state == State::Leader {

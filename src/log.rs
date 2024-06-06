@@ -1,9 +1,10 @@
 use crate::proto;
+use crate::proto::LogEntry;
 use log::error;
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {
-    static ref VIRTUAL_LOG_ENTRY: proto::LogEntry = proto::LogEntry {
+    static ref VIRTUAL_LOG_ENTRY: LogEntry = LogEntry {
         index: 0,
         term: 0,
         r#entry_type: proto::EntryType::Noop.into(),
@@ -15,7 +16,7 @@ pub type LogEntryData = (proto::EntryType, Vec<u8>);
 
 #[derive(Debug)]
 pub struct Log {
-    entries: Vec<proto::LogEntry>,
+    entries: Vec<LogEntry>,
     start_index: u64,
     append_mutex: Mutex<String>,
 }
@@ -33,7 +34,7 @@ impl Log {
         // Prevent the insertion of duplicate log entries with the same index
         if let Ok(_) = self.append_mutex.lock() {
             for entry_data in entry_data {
-                let entry = proto::LogEntry {
+                let entry = LogEntry {
                     index: self.last_index() + 1,
                     term,
                     r#entry_type: entry_data.0.into(),
@@ -47,15 +48,32 @@ impl Log {
         }
     }
 
-    pub fn entries(&self) -> &Vec<proto::LogEntry> {
+    pub fn entries(&self) -> &Vec<LogEntry> {
         &self.entries
     }
 
-    pub fn entry(&self, index: u64) -> Option<&proto::LogEntry> {
+    pub fn entry(&self, index: u64) -> Option<&LogEntry> {
         if index < self.start_index {
             return Some(&VIRTUAL_LOG_ENTRY);
         }
         self.entries.get((index - self.start_index) as usize)
+    }
+
+    pub fn pack_entries(&self, next_index: u64) -> Vec<LogEntry> {
+        let mut res = Vec::new();
+        if next_index < self.start_index {
+            return res;
+        }
+
+        for entry in self
+            .entries
+            .iter()
+            .skip((next_index - self.start_index) as usize)
+        {
+            res.push(entry.clone());
+        }
+
+        res
     }
 
     pub fn start_index(&self) -> u64 {
@@ -95,5 +113,8 @@ mod tests {
         assert_eq!(log.entry(1).unwrap().data, "test1".as_bytes());
         assert_eq!(log.entry(2).unwrap().data, "test2".as_bytes());
         assert_eq!(log.last_index(), 2);
+        assert_eq!(log.pack_entries(1).len(), 2);
+        assert_eq!(log.pack_entries(2).len(), 1);
+        assert_eq!(log.pack_entries(3).len(), 0);
     }
 }

@@ -46,8 +46,8 @@ impl Timer {
             trigger_interval.as_millis()
         );
 
-        (*self.trigger_interval.lock().unwrap()) = trigger_interval;
-        (*self.next_trigger.lock().unwrap()) = Instant::now() + trigger_interval;
+        *self.trigger_interval.lock().unwrap() = trigger_interval;
+        *self.next_trigger.lock().unwrap() = Instant::now() + trigger_interval;
         self.alive.store(true, Ordering::SeqCst);
 
         let trigger_interval = self.trigger_interval.clone();
@@ -70,7 +70,7 @@ impl Timer {
                     });
 
                     // calculate next trigger time
-                    (*next_trigger.lock().unwrap()) =
+                    *next_trigger.lock().unwrap() =
                         Instant::now() + (*trigger_interval.lock().unwrap());
                 }
             }
@@ -80,7 +80,7 @@ impl Timer {
     /// Stop the timer
     pub fn stop(&mut self) {
         info!("{} stopping", self.name);
-        self.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.alive.store(false, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             handle.join().unwrap();
         }

@@ -3,7 +3,7 @@ pub struct Peer {
     server_id: u64,
     pub(crate) server_addr: String,
     pub(crate) next_index: u64,
-    match_index: u64,
+    pub(crate) match_index: u64,
     vote_granted: bool,
 }
 
@@ -35,6 +35,23 @@ impl PeerManager {
 
     pub fn peers(&self) -> Vec<&Peer> {
         self.peers.iter().collect()
+    }
+
+    pub fn peers_mut(&mut self) -> &mut Vec<Peer> {
+        &mut self.peers
+    }
+
+    // Get the most match index
+    pub fn quorum_match_index(&self, leader_match_index: u64) -> u64 {
+        let mut match_indexes = Vec::new();
+        match_indexes.push(leader_match_index);
+
+        for peer in self.peers.iter() {
+            match_indexes.push(peer.match_index);
+        }
+
+        match_indexes.sort();
+        match_indexes.get(match_indexes.len() / 2).unwrap().clone()
     }
 }
 
