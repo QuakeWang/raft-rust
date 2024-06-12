@@ -6,7 +6,7 @@ use crate::proto::{
 };
 use crate::rpc::Client;
 use crate::timer::Timer;
-use crate::{config, proto, util};
+use crate::{config, proto, state_machine, util};
 use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 
@@ -34,10 +34,16 @@ pub struct Consensus {
     pub snapshot_timer: Arc<Mutex<Timer>>,
     rpc_client: Client,
     tokio_runtime: tokio::runtime::Runtime,
+    pub state_machine: Box<dyn state_machine::StateMachine>,
 }
 
 impl Consensus {
-    pub fn new(server_id: u64, port: u32, peers: Vec<Peer>) -> Arc<Mutex<Self>> {
+    pub fn new(
+        server_id: u64,
+        port: u32,
+        peers: Vec<Peer>,
+        state_machine: Box<dyn state_machine::StateMachine>,
+    ) -> Arc<Mutex<Self>> {
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
         let mut consensus = Self {
             server_id,
@@ -55,6 +61,7 @@ impl Consensus {
             log: Log::new(1),
             rpc_client: Client {},
             tokio_runtime,
+            state_machine,
         };
 
         consensus.peer_manager.add_peers(peers);
@@ -144,6 +151,7 @@ impl Consensus {
             true => {
                 peer.match_index = prev_log_index + entries_num as u64;
                 peer.next_index = peer.match_index + 1;
+                self.leader_advance_commit_index();
                 true
             }
             false => {
@@ -262,6 +270,15 @@ impl Consensus {
             "Advance commit index from {} to {}.",
             self.commit_index, new_commit_index
         );
+
+        for index in self.commit_index + 1..new_commit_index + 1 {
+            let entry = self.log.entry(index).unwrap();
+            if entry.entry_type() == proto::EntryType::Data {
+                info!("Apply data entry: {:?}", entry);
+                self.state_machine.apply(&entry.data);
+            }
+        }
+
         self.commit_index = new_commit_index;
     }
 
@@ -271,6 +288,13 @@ impl Consensus {
                 "Follower advance commit index from {} to {}.",
                 self.commit_index, leader_commit_index
             );
+            for index in self.commit_index + 1..leader_commit_index + 1 {
+                let entry = self.log.entry(index).unwrap();
+                if entry.entry_type() == proto::EntryType::Data {
+                    info!("Apply data entry: {:?}", entry);
+                    self.state_machine.apply(&entry.data);
+                }
+            }
             self.commit_index = leader_commit_index;
         }
     }

@@ -1,3 +1,14 @@
+#[derive(Debug)]
+struct MyStateMachine {
+    data: Vec<Vec<u8>>,
+}
+
+impl raft_rust::state_machine::StateMachine for MyStateMachine {
+    fn apply(&mut self, data: &Vec<u8>) {
+        self.data.push(data.clone())
+    }
+}
+
 fn main() {
     println!("Hello world!");
 
@@ -6,7 +17,8 @@ fn main() {
         raft_rust::peer::Peer::new(3, "http://[::1]:9093".to_string()),
     ];
 
-    let consensus = raft_rust::start(1, 9091, peers);
+    let state_machine = Box::new(MyStateMachine { data: Vec::new() });
+    let consensus = raft_rust::start(1, 9091, peers, state_machine);
 
     let mut count = 0;
 

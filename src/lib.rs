@@ -7,17 +7,23 @@ mod log;
 pub mod peer;
 pub mod proto;
 mod rpc;
+pub mod state_machine;
 mod timer;
 mod util;
 
-pub fn start(server_id: u64, port: u32, peers: Vec<peer::Peer>) -> Arc<Mutex<Consensus>> {
+pub fn start(
+    server_id: u64,
+    port: u32,
+    peers: Vec<peer::Peer>,
+    state_machine: Box<dyn state_machine::StateMachine>,
+) -> Arc<Mutex<Consensus>> {
     // TODO: Add config log
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
 
-    let consensus = Consensus::new(server_id, port, peers);
+    let consensus = Consensus::new(server_id, port, peers, state_machine);
 
     let server = rpc::Server {
         consensus: consensus.clone(),
