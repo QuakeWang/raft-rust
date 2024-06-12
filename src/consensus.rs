@@ -7,11 +7,11 @@ use crate::proto::{
 use crate::rpc::Client;
 use crate::timer::Timer;
 use crate::{config, proto, util};
-use log::{error, info};
+use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, PartialEq)]
-enum State {
+pub enum State {
     Follower,
     Candidate,
     Leader,
@@ -19,19 +19,19 @@ enum State {
 
 #[derive(Debug)]
 pub struct Consensus {
-    server_id: u64,
-    server_addr: String,
-    current_term: u64,
-    state: State,
+    pub server_id: u64,
+    pub server_addr: String,
+    pub current_term: u64,
+    pub state: State,
+    pub voted_for: u64,
+    pub commit_index: u64,
+    pub last_applied: u64,
+    pub leader_id: u64,
+    pub peer_manager: PeerManager,
+    pub log: Log,
     pub election_timer: Arc<Mutex<Timer>>,
     pub heartbeat_timer: Arc<Mutex<Timer>>,
     pub snapshot_timer: Arc<Mutex<Timer>>,
-    voted_for: u64,
-    commit_index: u64,
-    last_applied: u64,
-    leader_id: u64,
-    peer_manager: PeerManager,
-    log: Log,
     rpc_client: Client,
     tokio_runtime: tokio::runtime::Runtime,
 }
@@ -77,7 +77,7 @@ impl Consensus {
 
         // Save the log entry
         self.log
-            .append(self.current_term, vec![(r#type, data.as_bytes().to_vec())]);
+            .append_data(self.current_term, vec![(r#type, data.as_bytes().to_vec())]);
 
         // Send the log entry to other peers
         self.append_entries(false);
@@ -253,7 +253,7 @@ impl Consensus {
         }
     }
 
-    fn advance_commit_index(&mut self) {
+    fn leader_advance_commit_index(&mut self) {
         let new_commit_index = self.peer_manager.quorum_match_index(self.commit_index);
         if new_commit_index <= self.commit_index {
             return;
@@ -263,6 +263,16 @@ impl Consensus {
             self.commit_index, new_commit_index
         );
         self.commit_index = new_commit_index;
+    }
+
+    fn follower_advance_commit_index(&mut self, leader_commit_index: u64) {
+        if self.commit_index < leader_commit_index {
+            info!(
+                "Follower advance commit index from {} to {}.",
+                self.commit_index, leader_commit_index
+            );
+            self.commit_index = leader_commit_index;
+        }
     }
 
     pub fn handle_heartbeat_timeout(&mut self) {
@@ -313,6 +323,103 @@ impl Consensus {
         if self.state == State::Leader {
             info!("Handle snapshot timeout.");
             self.install_snapshot();
+        }
+    }
+
+    pub fn handle_append_entries_bak(
+        &mut self,
+        request: &AppendEntriesRequest,
+    ) -> AppendEntriesResponse {
+        let refuse_response = AppendEntriesResponse {
+            term: self.current_term,
+            success: false,
+        };
+
+        // Compare the request term with the current term.
+        if request.term < self.current_term {
+            return refuse_response;
+        }
+
+        // If the leader or candidate receives a request
+        // that the term is bigger than the current term,
+        // then step down to follower.
+        self.step_down(request.term);
+
+        // Update leader id.
+        if self.leader_id == config::NONE_SERVER_ID {
+            info!("Update leader id to {}.", request.leader_id);
+            self.leader_id = request.leader_id;
+        }
+
+        if self.leader_id != request.leader_id {
+            error!(
+                "There are more than one leader id, current: {}, new: {}",
+                self.leader_id, request.leader_id
+            );
+        }
+
+        if request.prev_log_index > self.log.last_index() {
+            warn!(
+                "Reject append entries because prev_log_index {} is greater than last index {}.",
+                request.prev_log_index,
+                self.log.last_index()
+            );
+            return refuse_response;
+        }
+
+        // Compare the prev_log_term with the log term.
+        if request.prev_log_index > self.log.start_index() {
+            let log_entry = self.log.entry(request.prev_log_index).unwrap();
+            if request.prev_log_term != log_entry.term {
+                info!(
+                    "Reject append entries because prev_log_term {} is not equal to log term {}.",
+                    request.prev_log_term, log_entry.term
+                );
+                return refuse_response;
+            }
+        }
+
+        // If the entries are empty, then it's a heartbeat.
+        if request.entries.is_empty() {
+            info!("Receive heartbeat from leader {}.", request.leader_id);
+            self.follower_advance_commit_index(request.leader_commit);
+            return AppendEntriesResponse {
+                term: self.current_term,
+                success: true,
+            };
+        }
+
+        let mut entries_to_be_replicated = Vec::new();
+        let mut index = request.prev_log_index;
+        for entry in request.entries.iter() {
+            index += 1;
+            if entry.index != index {
+                error!("Request entries index is not incremental.");
+                return refuse_response;
+            }
+            if index < self.log.start_index() {
+                continue;
+            }
+            if self.log.last_index() >= index {
+                let log_entry = self.log.entry(index).unwrap();
+                if log_entry.term == entry.term {
+                    continue;
+                }
+                info!(
+                    "Delete conflict log entry, index: {}, term: {}.",
+                    index, log_entry.term
+                );
+                let last_index_kept = index - 1;
+                self.log.truncate_suffix(last_index_kept);
+            }
+            entries_to_be_replicated.push(entry.clone());
+        }
+        self.log.append_entries(entries_to_be_replicated);
+        self.follower_advance_commit_index(request.leader_commit);
+
+        AppendEntriesResponse {
+            term: self.current_term,
+            success: true,
         }
     }
 

@@ -30,7 +30,7 @@ impl Log {
         }
     }
 
-    pub fn append(&mut self, term: u64, entry_data: Vec<LogEntryData>) {
+    pub fn append_data(&mut self, term: u64, entry_data: Vec<LogEntryData>) {
         // Prevent the insertion of duplicate log entries with the same index
         if let Ok(_) = self.append_mutex.lock() {
             for entry_data in entry_data {
@@ -40,6 +40,18 @@ impl Log {
                     r#entry_type: entry_data.0.into(),
                     data: entry_data.1,
                 };
+                self.entries.push(entry);
+            }
+        } else {
+            error!("Append log entry failed due to lock failure!");
+            return;
+        }
+    }
+
+    pub fn append_entries(&mut self, entries: Vec<LogEntry>) {
+        // Prevent the insertion of duplicate log entries with the same index
+        if let Ok(_) = self.append_mutex.lock() {
+            for entry in entries {
                 self.entries.push(entry);
             }
         } else {
@@ -90,6 +102,14 @@ impl Log {
     pub fn last_term(&self) -> u64 {
         self.entries.last().map(|entry| entry.term).unwrap_or(0)
     }
+
+    pub fn truncate_suffix(&mut self, last_index_kept: u64) {
+        if last_index_kept < self.start_index {
+            return;
+        }
+        self.entries
+            .truncate((last_index_kept - self.start_index + 1) as usize);
+    }
 }
 
 #[cfg(test)]
@@ -97,12 +117,12 @@ mod tests {
     #[test]
     fn test_log() {
         let mut log = super::Log::new(1);
-        log.append(
+        log.append_data(
             1,
             vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],
         );
 
-        log.append(
+        log.append_data(
             1,
             vec![(super::proto::EntryType::Data, "test2".as_bytes().to_vec())],
         );
@@ -116,5 +136,22 @@ mod tests {
         assert_eq!(log.pack_entries(1).len(), 2);
         assert_eq!(log.pack_entries(2).len(), 1);
         assert_eq!(log.pack_entries(3).len(), 0);
+    }
+
+    #[test]
+    fn test_log_truncate() {
+        let mut log = super::Log::new(1);
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],
+        );
+
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test2".as_bytes().to_vec())],
+        );
+
+        log.truncate_suffix(1);
+        assert_eq!(log.entries().len(), 1);
     }
 }
