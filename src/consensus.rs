@@ -1,8 +1,9 @@
 use crate::log::Log;
 use crate::peer::{self, Peer, PeerManager};
 use crate::proto::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, GetConfigurationRequest, GetConfigurationResponse,
+    GetLeaderRequest, GetLeaderResponse, InstallSnapshotRequest, InstallSnapshotResponse,
+    RequestVoteRequest, RequestVoteResponse, SetConfigurationRequest, SetConfigurationResponse,
 };
 use crate::rpc::Client;
 use crate::timer::Timer;
@@ -262,7 +263,7 @@ impl Consensus {
     }
 
     fn leader_advance_commit_index(&mut self) {
-        let new_commit_index = self.peer_manager.quorum_match_index(self.commit_index);
+        let new_commit_index = self.peer_manager.quorum_match_index(self.log.last_index());
         if new_commit_index <= self.commit_index {
             return;
         }
@@ -570,6 +571,59 @@ impl Consensus {
     ) -> InstallSnapshotResponse {
         info!("Handle install snapshot");
         let reply = InstallSnapshotResponse { term: 1 };
+        reply
+    }
+
+    pub fn handle_get_leader(&mut self, request: &GetLeaderRequest) -> GetLeaderResponse {
+        if self.state == State::Leader {
+            return GetLeaderResponse {
+                leader: Some(proto::Server {
+                    server_id: self.server_id,
+                    server_addr: self.server_addr.clone(),
+                }),
+            };
+        }
+
+        for peer in self.peer_manager.peers() {
+            if peer.server_id == self.server_id {
+                return GetLeaderResponse {
+                    leader: Some(proto::Server {
+                        server_id: peer.server_id,
+                        server_addr: peer.server_addr.clone(),
+                    }),
+                };
+            }
+        }
+        let reply = GetLeaderResponse { leader: None };
+        reply
+    }
+
+    pub fn handle_get_configuration(
+        &mut self,
+        request: &GetConfigurationRequest,
+    ) -> GetConfigurationResponse {
+        let mut servers = Vec::new();
+        for peer in self.peer_manager.peers() {
+            servers.push(proto::Server {
+                server_id: peer.server_id,
+                server_addr: peer.server_addr.clone(),
+            })
+        }
+        servers.push(proto::Server {
+            server_id: self.server_id,
+            server_addr: self.server_addr.clone(),
+        });
+
+        let reply = GetConfigurationResponse { servers };
+        reply
+    }
+
+    pub fn handle_set_configuration(
+        &mut self,
+        request: &SetConfigurationRequest,
+    ) -> SetConfigurationResponse {
+        info!("Handle set configuration!");
+        let reply = SetConfigurationResponse { success: true };
         reply
     }
 }

@@ -1,4 +1,5 @@
 use crate::consensus::Consensus;
+use ::log::error;
 use std::sync::{Arc, Mutex};
 
 mod config;
@@ -25,13 +26,10 @@ pub fn start(
 
     let consensus = Consensus::new(server_id, port, peers, state_machine);
 
-    let server = rpc::Server {
-        consensus: consensus.clone(),
-    };
-
+    let consensus_clone = consensus.clone();
     std::thread::spawn(move || {
         let addr = format!("[::1]:{}", port);
-        if let Err(_) = rpc::start_server(addr.as_str(), server) {
+        if let Err(_) = rpc::start_server(addr.as_str(), consensus_clone) {
             panic!("tonic rpc server started failed.");
         }
     });
@@ -45,12 +43,11 @@ pub fn start(
         .lock()
         .unwrap()
         .schedule(config::HEARTBEAT_INTERVAL, move || {
-            weak_consensus
-                .upgrade()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .handle_heartbeat_timeout();
+            if let Some(consensus) = weak_consensus.upgrade() {
+                consensus.lock().unwrap().handle_heartbeat_timeout();
+            } else {
+                error!("Heartbeat timer can not call after consensus is dropped.")
+            }
         });
     let weak_consensus = Arc::downgrade(&consensus);
     consensus
@@ -60,12 +57,11 @@ pub fn start(
         .lock()
         .unwrap()
         .schedule(util::rand_election_timeout(), move || {
-            weak_consensus
-                .upgrade()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .handle_election_timeout();
+            if let Some(consensus) = weak_consensus.upgrade() {
+                consensus.lock().unwrap().handle_election_timeout();
+            } else {
+                error!("Election timer can not call after consensus is dropped.")
+            }
         });
     let weak_consensus = Arc::downgrade(&consensus);
     consensus
@@ -75,12 +71,11 @@ pub fn start(
         .lock()
         .unwrap()
         .schedule(config::SNAPSHOT_INTERVAL, move || {
-            weak_consensus
-                .upgrade()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .handle_snapshot_timeout();
+            if let Some(consensus) = weak_consensus.upgrade() {
+                consensus.lock().unwrap().handle_snapshot_timeout();
+            } else {
+                error!("Snapshot timer can not call after consensus is dropped.")
+            }
         });
 
     consensus

@@ -1,9 +1,11 @@
 use crate::consensus::Consensus;
+use crate::proto;
 use crate::proto::consensus_rpc_client::ConsensusRpcClient;
 use crate::proto::consensus_rpc_server::{ConsensusRpc, ConsensusRpcServer};
 use crate::proto::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, GetConfigurationRequest, GetConfigurationResponse,
+    GetLeaderRequest, GetLeaderResponse, InstallSnapshotRequest, InstallSnapshotResponse,
+    RequestVoteRequest, RequestVoteResponse, SetConfigurationRequest, SetConfigurationResponse,
 };
 use log::info;
 use std::sync::{Arc, Mutex};
@@ -15,14 +17,23 @@ pub struct Server {
 }
 
 #[tokio::main]
-pub async fn start_server(addr: &str, server: Server) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_server(
+    addr: &str,
+    consensus: Arc<Mutex<Consensus>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr = addr.parse().unwrap();
     info!("Raft server listening on {}", addr);
+    let consensus_server = Server {
+        consensus: consensus.clone(),
+    };
+    let management_server = Server {
+        consensus: consensus.clone(),
+    };
     tonic::transport::Server::builder()
-        .add_service(ConsensusRpcServer::new(server))
+        .add_service(ConsensusRpcServer::new(consensus_server))
+        .add_service(ConsensusRpcServer::new(management_server))
         .serve(addr)
         .await?;
-
     Ok(())
 }
 
@@ -89,6 +100,75 @@ impl ConsensusRpc for Server {
         );
         info!(
             "Handle install snapshot request from {:?}, response: {:?}",
+            &addr, &response
+        );
+        Ok(response)
+    }
+}
+
+#[tonic::async_trait]
+impl proto::management_rpc_server::ManagementRpc for Server {
+    async fn get_leader(
+        &self,
+        request: Request<GetLeaderRequest>,
+    ) -> Result<Response<GetLeaderResponse>, Status> {
+        let addr = request.remote_addr().unwrap();
+        info!(
+            "Handle get leader from {:?}, request: {:?}.",
+            &addr, &request
+        );
+        let response = tonic::Response::new(
+            self.consensus
+                .lock()
+                .unwrap()
+                .handle_get_leader(&request.into_inner()),
+        );
+        info!(
+            "Handle get leader from {:?}, response: {:?}.",
+            &addr, &response
+        );
+        Ok(response)
+    }
+
+    async fn get_configuration(
+        &self,
+        request: Request<GetConfigurationRequest>,
+    ) -> Result<Response<GetConfigurationResponse>, Status> {
+        let addr = request.remote_addr().unwrap();
+        info!(
+            "Handle get configuration from {:?}, request: {:?}.",
+            &addr, &request
+        );
+        let response = tonic::Response::new(
+            self.consensus
+                .lock()
+                .unwrap()
+                .handle_get_configuration(&request.into_inner()),
+        );
+        info!(
+            "Handle get configuration from {:?}, response: {:?}.",
+            &addr, &response
+        );
+        Ok(response)
+    }
+
+    async fn set_configuration(
+        &self,
+        request: Request<SetConfigurationRequest>,
+    ) -> Result<Response<SetConfigurationResponse>, Status> {
+        let addr = request.remote_addr().unwrap();
+        info!(
+            "Handle set configuration from {:?}, request: {:?}.",
+            &addr, &request
+        );
+        let response = Response::new(
+            self.consensus
+                .lock()
+                .unwrap()
+                .handle_set_configuration(&request.into_inner()),
+        );
+        info!(
+            "Handle set configuration from {:?}, response: {:?}.",
             &addr, &response
         );
         Ok(response)
