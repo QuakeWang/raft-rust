@@ -1,4 +1,4 @@
-use crate::log::Log;
+use crate::log::{Configuration, Log, ServerInfo};
 use crate::peer::{self, Peer, PeerManager};
 use crate::proto::{
     AppendEntriesRequest, AppendEntriesResponse, GetConfigurationRequest, GetConfigurationResponse,
@@ -72,7 +72,7 @@ impl Consensus {
     pub fn replicate(
         &mut self,
         r#type: proto::EntryType,
-        data: String,
+        data: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.state != State::Leader {
             error!("Replicate should be processed by leader!");
@@ -81,11 +81,11 @@ impl Consensus {
                 "No leader!",
             )));
         }
-        info!("Replicate data: {}.", &data);
+        info!("Replicate data: {:?}.", &data);
 
         // Save the log entry
         self.log
-            .append_data(self.current_term, vec![(r#type, data.as_bytes().to_vec())]);
+            .append_data(self.current_term, vec![(r#type, data)]);
 
         // Send the log entry to other peers
         self.append_entries(false);
@@ -256,7 +256,10 @@ impl Consensus {
         self.leader_id = self.server_id;
 
         // Add NOOP log
-        if let Err(e) = self.replicate(proto::EntryType::Noop, config::NONE_DATA.to_string()) {
+        if let Err(e) = self.replicate(
+            proto::EntryType::Noop,
+            config::NONE_DATA.as_bytes().to_vec(),
+        ) {
             error!("Add NOOP entry failed after becoming leader, error: {}", e);
             return;
         }
@@ -623,6 +626,20 @@ impl Consensus {
         request: &SetConfigurationRequest,
     ) -> SetConfigurationResponse {
         info!("Handle set configuration!");
+
+        let mut old_new_configuration = Configuration::new();
+        old_new_configuration.append_new_servers(request.servers.as_ref());
+        old_new_configuration.append_old_servers(self.peer_manager.peers());
+        old_new_configuration
+            .old_servers
+            .push(ServerInfo(self.server_id, self.server_addr.clone()));
+
+        self.replicate(
+            proto::EntryType::Configuration,
+            old_new_configuration.to_data(),
+        )
+        .unwrap();
+
         let reply = SetConfigurationResponse { success: true };
         reply
     }
