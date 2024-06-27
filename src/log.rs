@@ -1,3 +1,4 @@
+use crate::config::Configuration;
 use crate::peer::Peer;
 use crate::proto;
 use crate::proto::LogEntry;
@@ -15,46 +16,6 @@ lazy_static::lazy_static! {
 }
 
 pub type LogEntryData = (proto::EntryType, Vec<u8>);
-
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
-pub struct ServerInfo(pub u64, pub String);
-
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
-pub struct Configuration {
-    pub old_servers: Vec<ServerInfo>,
-    pub new_servers: Vec<ServerInfo>,
-}
-
-impl Configuration {
-    pub fn new() -> Self {
-        Self {
-            old_servers: Vec::new(),
-            new_servers: Vec::new(),
-        }
-    }
-
-    pub fn from_data(data: &Vec<u8>) -> Self {
-        bincode::deserialize(data).expect("Failed to convert Vec<u8> to configuration.")
-    }
-
-    pub fn to_data(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to convert configuration to Vec<u8>.")
-    }
-
-    pub fn append_new_servers(&mut self, new_servers: &Vec<proto::Server>) {
-        for server in new_servers.iter() {
-            self.new_servers
-                .push(ServerInfo(server.server_id, server.server_addr.clone()));
-        }
-    }
-
-    pub fn append_old_servers(&mut self, peers: Vec<&Peer>) {
-        for peer in peers.iter() {
-            self.old_servers
-                .push(ServerInfo(peer.server_id, peer.server_addr.clone()));
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct Log {
@@ -152,6 +113,19 @@ impl Log {
         self.entries
             .truncate((last_index_kept - self.start_index + 1) as usize);
     }
+
+    pub fn last_configuration(&self) -> Configuration {
+        for entry in self.entries().iter().rev() {
+            if entry.entry_type() == proto::EntryType::Configuration {
+                return Configuration::from_data(&entry.data.as_ref());
+            }
+        }
+
+        return Configuration {
+            old_servers: Vec::new(),
+            new_servers: Vec::new(),
+        };
+    }
 }
 
 #[cfg(test)]
@@ -195,21 +169,5 @@ mod tests {
 
         log.truncate_suffix(1);
         assert_eq!(log.entries().len(), 1);
-    }
-
-    #[test]
-    fn test_configuration() {
-        let mut configuration = super::Configuration::new();
-        configuration
-            .old_servers
-            .push(super::ServerInfo(1, "[::1]:9001".to_string()));
-        configuration
-            .new_servers
-            .push(super::ServerInfo(2, "[::1]:9002".to_string()));
-
-        let ser_data = configuration.to_data();
-        let de_configuration = super::Configuration::from_data(&ser_data);
-
-        assert_eq!(de_configuration, configuration);
     }
 }

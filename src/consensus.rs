@@ -1,9 +1,11 @@
-use crate::log::{Configuration, Log, ServerInfo};
+use crate::config::{Configuration, ConfigurationState, ServerInfo};
+use crate::log::Log;
 use crate::peer::{self, Peer, PeerManager};
 use crate::proto::{
-    AppendEntriesRequest, AppendEntriesResponse, GetConfigurationRequest, GetConfigurationResponse,
-    GetLeaderRequest, GetLeaderResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    RequestVoteRequest, RequestVoteResponse, SetConfigurationRequest, SetConfigurationResponse,
+    AppendEntriesRequest, AppendEntriesResponse, EntryType, GetConfigurationRequest,
+    GetConfigurationResponse, GetLeaderRequest, GetLeaderResponse, InstallSnapshotRequest,
+    InstallSnapshotResponse, RequestVoteRequest, RequestVoteResponse, Server,
+    SetConfigurationRequest, SetConfigurationResponse,
 };
 use crate::rpc::Client;
 use crate::timer::Timer;
@@ -30,6 +32,7 @@ pub struct Consensus {
     pub leader_id: u64,
     pub peer_manager: PeerManager,
     pub log: Log,
+    pub configuration_state: ConfigurationState,
     pub election_timer: Arc<Mutex<Timer>>,
     pub heartbeat_timer: Arc<Mutex<Timer>>,
     pub snapshot_timer: Arc<Mutex<Timer>>,
@@ -60,6 +63,7 @@ impl Consensus {
             leader_id: config::NONE_SERVER_ID,
             peer_manager: PeerManager::new(),
             log: Log::new(1),
+            configuration_state: ConfigurationState::new(),
             rpc_client: Client {},
             tokio_runtime,
             state_machine,
@@ -71,7 +75,7 @@ impl Consensus {
 
     pub fn replicate(
         &mut self,
-        r#type: proto::EntryType,
+        r#type: EntryType,
         data: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.state != State::Leader {
@@ -86,6 +90,10 @@ impl Consensus {
         // Save the log entry
         self.log
             .append_data(self.current_term, vec![(r#type, data)]);
+
+        if r#type == EntryType::Configuration {
+            self.apply_configuration();
+        }
 
         // Send the log entry to other peers
         self.append_entries(false);
@@ -256,10 +264,7 @@ impl Consensus {
         self.leader_id = self.server_id;
 
         // Add NOOP log
-        if let Err(e) = self.replicate(
-            proto::EntryType::Noop,
-            config::NONE_DATA.as_bytes().to_vec(),
-        ) {
+        if let Err(e) = self.replicate(EntryType::Noop, config::NONE_DATA.as_bytes().to_vec()) {
             error!("Add NOOP entry failed after becoming leader, error: {}", e);
             return;
         }
@@ -275,11 +280,31 @@ impl Consensus {
             self.commit_index, new_commit_index
         );
 
-        for index in self.commit_index + 1..new_commit_index + 1 {
+        let prev_commit_index = self.commit_index;
+
+        for index in prev_commit_index + 1..new_commit_index + 1 {
             let entry = self.log.entry(index).unwrap();
-            if entry.entry_type() == proto::EntryType::Data {
-                info!("Apply data entry: {:?}", entry);
-                self.state_machine.apply(&entry.data);
+            match entry.entry_type() {
+                // Append new_configuration entry
+                EntryType::Configuration => {
+                    self.commit_index += 1;
+                    let configuration = Configuration::from_data(&entry.data);
+                    if !configuration.old_servers.is_empty()
+                        && !configuration.new_servers.is_empty()
+                    {
+                        info!("Append new_configuration entry when old_new_configuration commited, old_new_configuration: {:?}", entry);
+                        self.append_configuration(None);
+                    }
+                }
+                // Apply for StateMachine
+                EntryType::Data => {
+                    info!("Apply data entry: {:?}", entry);
+                    self.state_machine.apply(&entry.data);
+                    self.commit_index += 1;
+                }
+                EntryType::Noop => {
+                    self.commit_index += 1;
+                }
             }
         }
 
@@ -292,15 +317,61 @@ impl Consensus {
                 "Follower advance commit index from {} to {}.",
                 self.commit_index, leader_commit_index
             );
-            for index in self.commit_index + 1..leader_commit_index + 1 {
-                let entry = self.log.entry(index).unwrap();
-                if entry.entry_type() == proto::EntryType::Data {
-                    info!("Apply data entry: {:?}", entry);
-                    self.state_machine.apply(&entry.data);
+            let prev_commit_index = self.commit_index;
+            for index in prev_commit_index + 1..leader_commit_index + 1 {
+                if let Some(entry) = self.log.entry(index) {
+                    if entry.entry_type() == EntryType::Data {
+                        info!("Apply data entry: {:?}", entry);
+                        self.state_machine.apply(&entry.data);
+                    }
+                    self.commit_index += 1;
+                } else {
+                    // If the entry is not found, then break.
+                    break;
                 }
             }
-            self.commit_index = leader_commit_index;
         }
+    }
+
+    // TODO Apply configuration item
+    fn apply_configuration(&self) {
+        self.log.last_configuration();
+    }
+
+    // Append configuration item
+    fn append_configuration(&mut self, new_servers: Option<&Vec<Server>>) -> bool {
+        return match new_servers {
+            // Append old_new_configuration
+            Some(servers) => {
+                let mut old_new_configuration = Configuration::new();
+                old_new_configuration.append_new_servers(servers);
+                old_new_configuration.append_old_servers(self.peer_manager.peers());
+                old_new_configuration
+                    .old_servers
+                    .push(ServerInfo(self.server_id, self.server_addr.clone()));
+
+                match self.replicate(EntryType::Configuration, old_new_configuration.to_data()) {
+                    Ok(_) => true,
+                    Err(_) => false,
+                }
+            }
+            // Append new_configuration
+            None => {
+                let old_new_configuration = self.log.last_configuration();
+                if old_new_configuration.old_servers.is_empty()
+                    || old_new_configuration.new_servers.is_empty()
+                {
+                    panic!("There is no old_new_configuration before append new configuration.");
+                }
+
+                let new_configuration = old_new_configuration.gen_new_configuration();
+
+                match self.replicate(EntryType::Configuration, new_configuration.to_data()) {
+                    Ok(_) => true,
+                    Err(_) => false,
+                }
+            }
+        };
     }
 
     pub fn handle_heartbeat_timeout(&mut self) {
@@ -580,7 +651,7 @@ impl Consensus {
     pub fn handle_get_leader(&mut self, request: &GetLeaderRequest) -> GetLeaderResponse {
         if self.state == State::Leader {
             return GetLeaderResponse {
-                leader: Some(proto::Server {
+                leader: Some(Server {
                     server_id: self.server_id,
                     server_addr: self.server_addr.clone(),
                 }),
@@ -590,7 +661,7 @@ impl Consensus {
         for peer in self.peer_manager.peers() {
             if peer.server_id == self.server_id {
                 return GetLeaderResponse {
-                    leader: Some(proto::Server {
+                    leader: Some(Server {
                         server_id: peer.server_id,
                         server_addr: peer.server_addr.clone(),
                     }),
@@ -607,12 +678,12 @@ impl Consensus {
     ) -> GetConfigurationResponse {
         let mut servers = Vec::new();
         for peer in self.peer_manager.peers() {
-            servers.push(proto::Server {
+            servers.push(Server {
                 server_id: peer.server_id,
                 server_addr: peer.server_addr.clone(),
             })
         }
-        servers.push(proto::Server {
+        servers.push(Server {
             server_id: self.server_id,
             server_addr: self.server_addr.clone(),
         });
@@ -625,22 +696,22 @@ impl Consensus {
         &mut self,
         request: &SetConfigurationRequest,
     ) -> SetConfigurationResponse {
-        info!("Handle set configuration!");
+        let refuse_reply = SetConfigurationResponse { success: false };
 
-        let mut old_new_configuration = Configuration::new();
-        old_new_configuration.append_new_servers(request.servers.as_ref());
-        old_new_configuration.append_old_servers(self.peer_manager.peers());
-        old_new_configuration
-            .old_servers
-            .push(ServerInfo(self.server_id, self.server_addr.clone()));
+        if request.servers.is_empty() {
+            return refuse_reply;
+        }
 
-        self.replicate(
-            proto::EntryType::Configuration,
-            old_new_configuration.to_data(),
-        )
-        .unwrap();
+        let last_configuration = self.log.last_configuration();
 
-        let reply = SetConfigurationResponse { success: true };
+        if !last_configuration.old_servers.is_empty() && !last_configuration.new_servers.is_empty()
+        {
+            return refuse_reply;
+        }
+
+        let success = self.append_configuration(Some(request.servers.as_ref()));
+
+        let reply = SetConfigurationResponse { success };
         reply
     }
 }
