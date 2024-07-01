@@ -1,6 +1,6 @@
 use crate::config::{Configuration, ConfigurationState, ServerInfo};
 use crate::log::Log;
-use crate::peer::{self, Peer, PeerManager};
+use crate::peer::{Peer, PeerManager};
 use crate::proto::{
     AppendEntriesRequest, AppendEntriesResponse, EntryType, GetConfigurationRequest,
     GetConfigurationResponse, GetLeaderRequest, GetLeaderResponse, InstallSnapshotRequest,
@@ -9,7 +9,7 @@ use crate::proto::{
 };
 use crate::rpc::Client;
 use crate::timer::Timer;
-use crate::{config, proto, state_machine, util};
+use crate::{config, state_machine, util};
 use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 
@@ -89,10 +89,10 @@ impl Consensus {
 
         // Save the log entry
         self.log
-            .append_data(self.current_term, vec![(r#type, data)]);
+            .append_data(self.current_term, vec![(r#type, data.clone())]);
 
         if r#type == EntryType::Configuration {
-            self.apply_configuration();
+            self.apply_configuration(Configuration::from_data(&data));
         }
 
         // Send the log entry to other peers
@@ -112,8 +112,11 @@ impl Consensus {
         }
 
         // TODO: Send the log entries to other peers in parallel.
-        let peer_ids = self.peer_manager.peer_ids();
-        for peer_server_id in peer_ids.iter() {
+        let peer_server_ids = self.peer_manager.peer_server_ids();
+        if peer_server_ids.is_empty() {
+            self.leader_advance_commit_index();
+        }
+        for peer_server_id in peer_server_ids.iter() {
             self.append_entries_to_peer(peer_server_id.clone(), heartbeat);
         }
 
@@ -176,8 +179,8 @@ impl Consensus {
         info!("Start request vote");
         let mut vote_granted_count = 0;
 
-        let peer_ids = self.peer_manager.peer_ids();
-        for peer_server_id in peer_ids.iter() {
+        let peer_server_ids = self.peer_manager.peer_server_ids();
+        for peer_server_id in peer_server_ids.iter() {
             let peer = self.peer_manager.peer(peer_server_id.clone()).unwrap();
             info!("Request vote to {:?}.", &peer.server_addr);
             let request = RequestVoteRequest {
@@ -210,7 +213,7 @@ impl Consensus {
                     vote_granted_count += 1;
                 }
 
-                if vote_granted_count + 1 > (peer_ids.len() / 2) {
+                if vote_granted_count + 1 > (peer_server_ids.len() / 2) {
                     info!("Become leader.");
                     self.become_leader();
                     return;
@@ -218,6 +221,12 @@ impl Consensus {
             } else {
                 error!("Request vote to {} failed.", &peer.server_addr);
             }
+        }
+
+        if vote_granted_count + 1 > (peer_server_ids.len() / 2) {
+            info!("Become leader.");
+            self.become_leader();
+            return;
         }
     }
 
@@ -243,6 +252,13 @@ impl Consensus {
         if new_term > self.current_term {
             self.current_term = new_term;
             self.voted_for = config::NONE_SERVER_ID;
+            self.leader_id = config::NONE_SERVER_ID;
+        } else {
+            // Case: new_term == self.current_term
+            // 1. Leader receives AppendEntries RPC => fallback to Follower
+            // 2. Leader receives RequestVote RPC => no fallback to Follower
+            // 3. Candidate receives AppendEntries RPC => fallback to Follower
+            // 4. Candidate receives RequestVote RPC => no fallback to Follower
             self.leader_id = config::NONE_SERVER_ID;
         }
 
@@ -333,9 +349,22 @@ impl Consensus {
         }
     }
 
-    // TODO Apply configuration item
-    fn apply_configuration(&self) {
-        self.log.last_configuration();
+    fn apply_configuration(&mut self, configuration: Configuration) {
+        // Update the peers' list
+        let mut new_peers = Vec::new();
+        for server_info in configuration.new_servers.iter() {
+            if !self.peer_manager.contains(server_info.0) && server_info.0 != self.server_id {
+                new_peers.push(Peer::new(server_info.0, server_info.1.clone()));
+            }
+        }
+        self.peer_manager.add_peers(new_peers);
+
+        // Update the node configuration
+        for peer in self.peer_manager.peers_mut().iter_mut() {
+            let _ =
+                peer.configuration_state == configuration.query_configuration_state(peer.server_id);
+        }
+        let _ = self.configuration_state = configuration.query_configuration_state(self.server_id);
     }
 
     // Append configuration item
@@ -425,7 +454,7 @@ impl Consensus {
         }
     }
 
-    pub fn handle_append_entries_bak(
+    pub fn handle_append_entries(
         &mut self,
         request: &AppendEntriesRequest,
     ) -> AppendEntriesResponse {
@@ -513,65 +542,24 @@ impl Consensus {
             }
             entries_to_be_replicated.push(entry.clone());
         }
+
+        let mut configuration_entries = Vec::new();
+        for entry in entries_to_be_replicated.iter() {
+            if entry.entry_type() == EntryType::Configuration {
+                configuration_entries.push(entry.clone());
+            }
+        }
+        // Update the lo
         self.log.append_entries(entries_to_be_replicated);
+        // Apply the configuration
+        for configuration_entry in configuration_entries.iter() {
+            self.apply_configuration(Configuration::from_data(configuration_entry.data.as_ref()));
+        }
+        // Update the commit index
         self.follower_advance_commit_index(request.leader_commit);
 
         AppendEntriesResponse {
             term: self.current_term,
-            success: true,
-        }
-    }
-
-    pub fn handle_append_entries(
-        &mut self,
-        request: &AppendEntriesRequest,
-    ) -> AppendEntriesResponse {
-        let refuse_response = AppendEntriesResponse {
-            term: self.current_term,
-            success: false,
-        };
-
-        // If the request term is smaller than the current term, then refuse.
-        if request.term < self.current_term {
-            info!(
-                "Refuse append entries, because request term {} is smaller than current term {}.",
-                request.term, self.current_term
-            );
-            return refuse_response;
-        }
-
-        // Step down to the request term.
-        self.step_down(request.term);
-
-        if self.leader_id == config::NONE_SERVER_ID {
-            info!("Update leader id to {}.", request.leader_id);
-            self.leader_id = request.leader_id;
-        }
-        if self.leader_id != request.leader_id {
-            error!(
-                "Leader id {} is not equal to request leader id {}.",
-                self.leader_id, request.leader_id
-            );
-            // TODO
-        }
-
-        match self.state {
-            State::Leader => {
-                panic!(
-                    "Leader {} receive append entries from {}.",
-                    self.server_id, request.leader_id
-                );
-            }
-            State::Candidate => {
-                panic!(
-                    "Candidate {} receive append entries from {}.",
-                    self.server_id, request.leader_id
-                );
-            }
-            State::Follower => {}
-        }
-        AppendEntriesResponse {
-            term: 1,
             success: true,
         }
     }
@@ -641,14 +629,14 @@ impl Consensus {
 
     pub fn handle_install_snapshot(
         &mut self,
-        request: InstallSnapshotRequest,
+        _request: InstallSnapshotRequest,
     ) -> InstallSnapshotResponse {
         info!("Handle install snapshot");
         let reply = InstallSnapshotResponse { term: 1 };
         reply
     }
 
-    pub fn handle_get_leader(&mut self, request: &GetLeaderRequest) -> GetLeaderResponse {
+    pub fn handle_get_leader(&mut self, _request: &GetLeaderRequest) -> GetLeaderResponse {
         if self.state == State::Leader {
             return GetLeaderResponse {
                 leader: Some(Server {
@@ -674,7 +662,7 @@ impl Consensus {
 
     pub fn handle_get_configuration(
         &mut self,
-        request: &GetConfigurationRequest,
+        _request: &GetConfigurationRequest,
     ) -> GetConfigurationResponse {
         let mut servers = Vec::new();
         for peer in self.peer_manager.peers() {

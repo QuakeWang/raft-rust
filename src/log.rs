@@ -1,9 +1,7 @@
 use crate::config::Configuration;
-use crate::peer::Peer;
 use crate::proto;
 use crate::proto::LogEntry;
 use log::error;
-use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {

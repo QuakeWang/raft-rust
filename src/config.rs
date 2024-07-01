@@ -19,17 +19,17 @@ pub const NONE_SERVER_ID: u64 = 0;
 // None data
 pub const NONE_DATA: &'static str = "None";
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ConfigurationState {
-    pub is_new: bool,
-    pub is_old: bool,
+    pub in_new: bool,
+    pub in_old: bool,
 }
 
 impl ConfigurationState {
     pub fn new() -> Self {
         Self {
-            is_new: false,
-            is_old: false,
+            in_new: false,
+            in_old: false,
         }
     }
 }
@@ -82,10 +82,27 @@ impl Configuration {
             new_servers: self.old_servers.clone(),
         }
     }
+
+    pub fn query_configuration_state(&self, server_id: u64) -> ConfigurationState {
+        ConfigurationState {
+            in_new: self
+                .new_servers
+                .iter()
+                .find(|new_server| new_server.0 == server_id)
+                .is_some(),
+            in_old: self
+                .old_servers
+                .iter()
+                .find(|old_server| old_server.0 == server_id)
+                .is_some(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ConfigurationState;
+
     #[test]
     fn test_configuration() {
         let mut configuration = super::Configuration::new();
@@ -100,5 +117,13 @@ mod tests {
         let de_configuration = super::Configuration::from_data(&ser_data);
 
         assert_eq!(de_configuration, configuration);
+
+        assert_eq!(
+            configuration.query_configuration_state(1),
+            ConfigurationState {
+                in_new: false,
+                in_old: true
+            }
+        );
     }
 }

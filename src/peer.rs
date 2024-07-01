@@ -6,7 +6,7 @@ pub struct Peer {
     pub(crate) server_addr: String,
     pub(crate) next_index: u64,
     pub(crate) match_index: u64,
-    pub(crate) vote_granted: bool,
+    pub(crate) _vote_granted: bool,
     pub configuration_state: ConfigurationState,
 }
 
@@ -17,7 +17,7 @@ impl Peer {
             server_addr,
             next_index: 1,
             match_index: 0,
-            vote_granted: false,
+            _vote_granted: false,
             configuration_state: ConfigurationState::new(),
         }
     }
@@ -55,8 +55,15 @@ impl PeerManager {
         self.peers.len()
     }
 
-    pub fn peer_ids(&self) -> Vec<u64> {
+    pub fn peer_server_ids(&self) -> Vec<u64> {
         self.peers.iter().map(|peer| peer.server_id).collect()
+    }
+
+    pub fn contains(&self, server_id: u64) -> bool {
+        self.peers
+            .iter()
+            .find(|peer| peer.server_id == server_id)
+            .is_some()
     }
 
     // Get the most match index
@@ -88,7 +95,7 @@ mod tests {
             server_addr: "127.0.0.1:4001".to_string(),
             next_index: 3,
             match_index: 2,
-            vote_granted: false,
+            _vote_granted: false,
             configuration_state: ConfigurationState::new(),
         };
         let peer2 = Peer {
@@ -96,7 +103,7 @@ mod tests {
             server_addr: "127.0.0.1:4002".to_string(),
             next_index: 2,
             match_index: 2,
-            vote_granted: false,
+            _vote_granted: false,
             configuration_state: ConfigurationState::new(),
         };
         peer_manager.add_peers(vec![peer1, peer2]);
