@@ -177,8 +177,8 @@ impl Consensus {
 
     fn request_vote(&mut self) {
         info!("Start request vote");
-        let mut vote_granted_count = 0;
-
+        // Reset the vote status
+        self.peer_manager.reset_vote();
         let peer_server_ids = self.peer_manager.peer_server_ids();
         for peer_server_id in peer_server_ids.iter() {
             let peer = self.peer_manager.peer(peer_server_id.clone()).unwrap();
@@ -197,7 +197,6 @@ impl Consensus {
                     "Request vote to {:?}, response: {:?}",
                     &peer.server_addr, &response
                 );
-
                 // If the peer has bigger term, then become a follower.
                 if response.term > self.current_term {
                     info!(
@@ -207,13 +206,16 @@ impl Consensus {
                     self.state = State::Follower;
                     return;
                 }
-                // If the peer vote granted, then vote granted count + 1.
+                // Get a vote
                 if response.vote_granted {
                     info!("Peer {} vote granted.", &peer.server_addr);
-                    vote_granted_count += 1;
+                    peer.vote_granted = true;
                 }
-
-                if vote_granted_count + 1 > (peer_server_ids.len() / 2) {
+                // Get the more vote from the quorum, then become a leader.
+                if self
+                    .peer_manager
+                    .quorum_vote_granted(&self.configuration_state)
+                {
                     info!("Become leader.");
                     self.become_leader();
                     return;
@@ -223,7 +225,11 @@ impl Consensus {
             }
         }
 
-        if vote_granted_count + 1 > (peer_server_ids.len() / 2) {
+        // Get the more vote from the quorum, then become a leader.
+        if self
+            .peer_manager
+            .quorum_vote_granted(&self.configuration_state)
+        {
             info!("Become leader.");
             self.become_leader();
             return;
@@ -287,7 +293,9 @@ impl Consensus {
     }
 
     fn leader_advance_commit_index(&mut self) {
-        let new_commit_index = self.peer_manager.quorum_match_index(self.log.last_index());
+        let new_commit_index = self
+            .peer_manager
+            .quorum_match_index(&self.configuration_state, self.log.last_index());
         if new_commit_index <= self.commit_index {
             return;
         }
