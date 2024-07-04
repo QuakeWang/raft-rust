@@ -92,7 +92,7 @@ impl Consensus {
             .append_data(self.current_term, vec![(r#type, data.clone())]);
 
         if r#type == EntryType::Configuration {
-            self.apply_configuration(Configuration::from_data(&data));
+            self.apply_configuration(Configuration::from_data(&data), false);
         }
 
         // Send the log entry to other peers
@@ -124,7 +124,17 @@ impl Consensus {
     }
 
     fn append_entries_to_peer(&mut self, peer_server_id: u64, heartbeat: bool) -> bool {
-        let peer = self.peer_manager.peer(peer_server_id).unwrap();
+        let peer = match self.peer_manager.peer(peer_server_id) {
+            None => {
+                warn!(
+                    "Peer {} not found in peer_manager when append entries.",
+                    peer_server_id
+                );
+                return false;
+            }
+            Some(peer) => peer,
+        };
+
         let entries = match heartbeat {
             true => self.log.pack_entries(peer.next_index),
             false => Vec::new(),
@@ -312,10 +322,12 @@ impl Consensus {
                 // Append new_configuration entry
                 EntryType::Configuration => {
                     self.commit_index += 1;
+
                     let configuration = Configuration::from_data(&entry.data);
-                    if !configuration.old_servers.is_empty()
-                        && !configuration.new_servers.is_empty()
-                    {
+
+                    self.apply_configuration(configuration.clone(), true);
+
+                    if configuration.is_configuration_old_new() {
                         info!("Append new_configuration entry when old_new_configuration commited, old_new_configuration: {:?}", entry);
                         self.append_configuration(None);
                     }
@@ -344,20 +356,93 @@ impl Consensus {
             let prev_commit_index = self.commit_index;
             for index in prev_commit_index + 1..leader_commit_index + 1 {
                 if let Some(entry) = self.log.entry(index) {
-                    if entry.entry_type() == EntryType::Data {
-                        info!("Apply data entry: {:?}", entry);
-                        self.state_machine.apply(&entry.data);
+                    match entry.entry_type() {
+                        EntryType::Configuration => {
+                            let configuration = Configuration::from_data(&entry.data);
+                            self.apply_configuration(configuration, true);
+                        }
+                        EntryType::Data => {
+                            info!("Apply data entry: {:?}", entry);
+                            self.state_machine.apply(&entry.data);
+                        }
+                        EntryType::Noop => {}
                     }
                     self.commit_index += 1;
                 } else {
-                    // If the entry is not found, then break.
+                    // The entry does not exist, break the loop
                     break;
                 }
             }
         }
     }
 
-    fn apply_configuration(&mut self, configuration: Configuration) {
+    fn apply_configuration(&mut self, configuration: Configuration, commited: bool) {
+        // Configuration-old-new
+        if configuration.is_configuration_old_new() {
+            if commited {
+                info!("Apply configuration-old-new when configuration commited.");
+            } else {
+                info!("Apply configuration-old-new when configuration appended.");
+
+                // Add a new peer node
+                let mut new_peers = Vec::new();
+                for server_info in configuration.new_servers.iter() {
+                    if !self.peer_manager.contains(server_info.0) && server_info.0 != self.server_id
+                    {
+                        new_peers.push(Peer::new(server_info.0, server_info.1.clone()));
+                    }
+                }
+                self.peer_manager.add_peers(new_peers);
+
+                // Update the peers' configuration state
+                for peer in self.peer_manager.peers_mut().iter_mut() {
+                    peer.configuration_state =
+                        configuration.query_configuration_state(peer.server_id);
+                }
+                self.configuration_state = configuration.query_configuration_state(self.server_id);
+            }
+        } else if configuration.is_configuration_new() {
+            if commited {
+                info!("Apply configuration-new when configuration commited.");
+                // Shutdown the leader node
+                if !self.configuration_state.in_new && self.state == State::Leader {
+                    self.shutdown()
+                }
+            } else {
+                info!("Apply configuration-new when configuration appended.");
+
+                // Update the peers' configuration state
+                for peer in self.peer_manager.peers_mut().iter_mut() {
+                    peer.configuration_state =
+                        configuration.query_configuration_state(peer.server_id);
+                }
+                self.configuration_state = configuration.query_configuration_state(self.server_id);
+
+                // Remove the old node
+                let mut peer_ids_to_be_removed = Vec::new();
+                for peer in self.peer_manager.peers() {
+                    if !peer.configuration_state.in_new {
+                        peer_ids_to_be_removed.push(peer.server_id);
+                    }
+                }
+                self.peer_manager.remove_peers(peer_ids_to_be_removed);
+
+                // Shutdown the non-leader node
+                if !self.configuration_state.in_new && self.state != State::Leader {
+                    self.shutdown();
+                }
+            }
+        }
+    }
+
+    pub fn shutdown(&self) {
+        info!("Shutdown this node.");
+        self.heartbeat_timer.lock().unwrap().stop();
+        self.election_timer.lock().unwrap().stop();
+        self.snapshot_timer.lock().unwrap().stop();
+    }
+
+    fn apply_configuration_(&mut self, configuration: Configuration) {
         // Update the peers' list
         let mut new_peers = Vec::new();
         for server_info in configuration.new_servers.iter() {
@@ -395,9 +480,7 @@ impl Consensus {
             // Append new_configuration
             None => {
                 let old_new_configuration = self.log.last_configuration();
-                if old_new_configuration.old_servers.is_empty()
-                    || old_new_configuration.new_servers.is_empty()
-                {
+                if !old_new_configuration.is_configuration_old_new() {
                     panic!("There is no old_new_configuration before append new configuration.");
                 }
 
@@ -561,7 +644,10 @@ impl Consensus {
         self.log.append_entries(entries_to_be_replicated);
         // Apply the configuration
         for configuration_entry in configuration_entries.iter() {
-            self.apply_configuration(Configuration::from_data(configuration_entry.data.as_ref()));
+            self.apply_configuration(
+                Configuration::from_data(configuration_entry.data.as_ref()),
+                false,
+            );
         }
         // Update the commit index
         self.follower_advance_commit_index(request.leader_commit);
@@ -578,6 +664,10 @@ impl Consensus {
             vote_granted: false,
         };
 
+        if !self.peer_manager.contains(request.candidate_id) {
+            return refuse_response;
+        }
+
         if request.term < self.current_term {
             info!(
                 "Refuse request vote, because request term {} is smaller than current term {}.",
@@ -586,13 +676,23 @@ impl Consensus {
             return refuse_response;
         }
 
+        if let Some(last_reset_at) = self.election_timer.lock().unwrap().last_reset_at {
+            if last_reset_at.elapsed() < config::ELECTION_TIMEOUT_MIN {
+                return refuse_response;
+            }
+        }
+
         if request.term > self.current_term {
             self.step_down(request.term);
+        } else {
+            if self.state == State::Leader || self.state == State::Candidate {
+                return refuse_response;
+            }
         }
 
         let log_is_ok = request.term > self.log.last_term()
             || (request.term == self.log.last_term()
-                && request.last_log_index >= self.log.last_index());
+            && request.last_log_index >= self.log.last_index());
         if !log_is_ok {
             return refuse_response;
         }

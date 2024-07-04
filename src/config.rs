@@ -6,7 +6,7 @@ use std::time::Duration;
 // Election timeout
 pub const ELECTION_TIMEOUT_MIN_MILLIS: u64 = 10000;
 pub const ELECTION_TIMEOUT_MAX_MILLIS: u64 = 15000;
-
+pub const ELECTION_TIMEOUT_MIN: Duration = Duration::from_millis(ELECTION_TIMEOUT_MIN_MILLIS);
 // Heartbeat interval
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(3000);
 
@@ -37,7 +37,7 @@ impl ConfigurationState {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ServerInfo(pub u64, pub String);
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Configuration {
     pub old_servers: Vec<ServerInfo>,
     pub new_servers: Vec<ServerInfo>,
@@ -97,6 +97,14 @@ impl Configuration {
                 .is_some(),
         }
     }
+
+    pub fn is_configuration_old_new(&self) -> bool {
+        !self.old_servers.is_empty() && !self.new_servers.is_empty()
+    }
+
+    pub fn is_configuration_new(&self) -> bool {
+        self.old_servers.is_empty() && !self.new_servers.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -122,7 +130,7 @@ mod tests {
             configuration.query_configuration_state(1),
             ConfigurationState {
                 in_new: false,
-                in_old: true
+                in_old: true,
             }
         );
     }
