@@ -13,6 +13,9 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(3000);
 // Snapshot interval
 pub const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(30000);
 
+// Snapshot log length threshold
+pub const SNAPSHOT_LOG_LENGTH_THRESHOLD: usize = 5;
+
 // None server id
 pub const NONE_SERVER_ID: u64 = 0;
 

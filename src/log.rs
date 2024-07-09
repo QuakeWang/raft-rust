@@ -36,7 +36,7 @@ impl Log {
         if let Ok(_) = self.append_mutex.lock() {
             for entry_data in entry_data {
                 let entry = LogEntry {
-                    index: self.last_index() + 1,
+                    index: self.last_index(0) + 1,
                     term,
                     r#entry_type: entry_data.0.into(),
                     data: entry_data.1,
@@ -93,14 +93,33 @@ impl Log {
         self.start_index
     }
 
-    pub fn last_index(&self) -> u64 {
+    pub fn last_index(&self, last_included_index: u64) -> u64 {
+        // If the log is empty, return the last_included_index
+        if self.entries.is_empty() && last_included_index > 0 {
+            return last_included_index;
+        }
         self.entries
             .last()
             .map(|entry| entry.index)
             .unwrap_or(self.start_index - 1)
     }
 
-    pub fn last_term(&self) -> u64 {
+    pub fn prev_log_term(
+        &self,
+        prev_log_index: u64,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) -> u64 {
+        if prev_log_index == last_included_index {
+            return last_included_term;
+        }
+        return self.entry(prev_log_index).unwrap().term;
+    }
+
+    pub fn last_term(&self, last_included_term: u64) -> u64 {
+        if self.entries.is_empty() && last_included_term > 0 {
+            return last_included_term;
+        }
         self.entries.last().map(|entry| entry.term).unwrap_or(0)
     }
 
@@ -112,17 +131,29 @@ impl Log {
             .truncate((last_index_kept - self.start_index + 1) as usize);
     }
 
-    pub fn last_configuration(&self) -> Configuration {
+    pub fn truncate_prefix(&mut self, last_included_index: u64) {
+        if last_included_index < self.start_index {
+            return;
+        }
+        self.entries
+            .drain(0..(last_included_index - self.start_index + 1) as usize);
+        self.start_index = last_included_index + 1;
+    }
+
+    pub fn committed_entries_len(&self, commit_index: u64) -> usize {
+        if commit_index < self.start_index {
+            return 0;
+        }
+        return (commit_index - self.start_index + 1) as usize;
+    }
+
+    pub fn last_configuration(&self) -> Option<Configuration> {
         for entry in self.entries().iter().rev() {
             if entry.entry_type() == proto::EntryType::Configuration {
-                return Configuration::from_data(&entry.data.as_ref());
+                return Some(Configuration::from_data(&entry.data.as_ref()));
             }
         }
-
-        return Configuration {
-            old_servers: Vec::new(),
-            new_servers: Vec::new(),
-        };
+        None
     }
 }
 
@@ -146,7 +177,7 @@ mod tests {
         assert_eq!(log.start_index(), 1);
         assert_eq!(log.entry(1).unwrap().data, "test1".as_bytes());
         assert_eq!(log.entry(2).unwrap().data, "test2".as_bytes());
-        assert_eq!(log.last_index(), 2);
+        assert_eq!(log.last_index(0), 2);
         assert_eq!(log.pack_entries(1).len(), 2);
         assert_eq!(log.pack_entries(2).len(), 1);
         assert_eq!(log.pack_entries(3).len(), 0);
@@ -167,5 +198,51 @@ mod tests {
 
         log.truncate_suffix(1);
         assert_eq!(log.entries().len(), 1);
+    }
+
+    #[test]
+    fn test_log_truncate_prefix() {
+        let mut log = super::Log::new(1);
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],
+        );
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test2".as_bytes().to_vec())],
+        );
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test3".as_bytes().to_vec())],
+        );
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test4".as_bytes().to_vec())],
+        );
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test5".as_bytes().to_vec())],
+        );
+
+        log.truncate_prefix(3);
+        assert_eq!(log.entries().len(), 2);
+        assert_eq!(log.start_index(), 4);
+
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test6".as_bytes().to_vec())],
+        );
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test7".as_bytes().to_vec())],
+        );
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test8".as_bytes().to_vec())],
+        );
+
+        log.truncate_prefix(5);
+        assert_eq!(log.entries().len(), 3);
+        assert_eq!(log.start_index(), 6);
     }
 }

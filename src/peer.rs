@@ -37,7 +37,7 @@ impl PeerManager {
         self.peers.extend(peers);
     }
 
-    pub fn remove_peer(&mut self, server_ids: Vec<u64>) {
+    pub fn remove_peers(&mut self, server_ids: Vec<u64>) {
         for server_id in server_ids {
             if let Some(position) = self
                 .peers

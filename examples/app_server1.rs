@@ -1,3 +1,5 @@
+use std::io::Write;
+
 #[derive(Debug)]
 struct MyStateMachine {
     data: Vec<Vec<u8>>,
@@ -8,9 +10,15 @@ impl raft_rust::state_machine::StateMachine for MyStateMachine {
         self.data.push(data.clone())
     }
 
-    fn take_snapshot(&mut self) {}
+    fn take_snapshot(&mut self, snapshot_filepath: String) {
+        let mut snapshot_file = std::fs::File::create(snapshot_filepath.clone()).unwrap();
+        let snapshot_json = serde_json::to_string(&self.data).unwrap();
+        if let Err(e) = snapshot_file.write(snapshot_json.as_bytes()) {
+            panic!("Failed to write snapshot file, err: {}.", e);
+        }
+    }
 
-    fn restore_snapshot(&mut self) {}
+    fn restore_snapshot(&mut self, _snapshot_filepath: String) {}
 }
 
 fn main() {
@@ -22,7 +30,12 @@ fn main() {
     ];
 
     let state_machine = Box::new(MyStateMachine { data: Vec::new() });
-    let consensus = raft_rust::start(1, 9091, peers, state_machine);
+    let snapshot_dir = format!(
+        "{}/{}",
+        std::env::current_dir().unwrap().to_str().unwrap(),
+        "./app_server1/".to_string()
+    );
+    let consensus = raft_rust::start(1, 9091, peers, state_machine, snapshot_dir);
 
     let mut count = 0;
 

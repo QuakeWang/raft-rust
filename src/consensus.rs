@@ -9,7 +9,7 @@ use crate::proto::{
 };
 use crate::rpc::Client;
 use crate::timer::Timer;
-use crate::{config, state_machine, util};
+use crate::{config, snapshot, state_machine, util};
 use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +32,7 @@ pub struct Consensus {
     pub leader_id: u64,
     pub peer_manager: PeerManager,
     pub log: Log,
+    snapshot: snapshot::Snapshot,
     pub configuration_state: ConfigurationState,
     pub election_timer: Arc<Mutex<Timer>>,
     pub heartbeat_timer: Arc<Mutex<Timer>>,
@@ -47,6 +48,7 @@ impl Consensus {
         port: u32,
         peers: Vec<Peer>,
         state_machine: Box<dyn state_machine::StateMachine>,
+        snapshot_dir: String,
     ) -> Arc<Mutex<Self>> {
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
         let mut consensus = Self {
@@ -63,6 +65,7 @@ impl Consensus {
             leader_id: config::NONE_SERVER_ID,
             peer_manager: PeerManager::new(),
             log: Log::new(1),
+            snapshot: snapshot::Snapshot::new(snapshot_dir),
             configuration_state: ConfigurationState::new(),
             rpc_client: Client {},
             tokio_runtime,
@@ -137,17 +140,17 @@ impl Consensus {
 
         let entries = match heartbeat {
             true => self.log.pack_entries(peer.next_index),
-            false => Vec::new(),
+            false => Vec::with_capacity(0),
         };
 
         let entries_num = entries.len();
 
         let prev_log_index = peer.next_index - 1;
-        let prev_log = self.log.entry(prev_log_index).unwrap();
+        let prev_log_term = self.log.prev_log_term(prev_log_index, self.snapshot.last_included_index, self.snapshot.last_included_term);
         let request = AppendEntriesRequest {
             term: self.current_term,
             leader_id: self.server_id,
-            prev_log_term: prev_log.term,
+            prev_log_term,
             prev_log_index,
             entries,
             leader_commit: self.commit_index,
@@ -196,8 +199,8 @@ impl Consensus {
             let request = RequestVoteRequest {
                 term: self.current_term,
                 candidate_id: self.server_id,
-                last_log_term: self.log.last_term(),
-                last_log_index: self.log.last_index(),
+                last_log_term: self.log.last_term(self.snapshot.last_included_term),
+                last_log_index: self.log.last_index(self.snapshot.last_included_index),
             };
             if let Ok(response) = self.tokio_runtime.block_on(
                 self.rpc_client
@@ -303,9 +306,10 @@ impl Consensus {
     }
 
     fn leader_advance_commit_index(&mut self) {
-        let new_commit_index = self
-            .peer_manager
-            .quorum_match_index(&self.configuration_state, self.log.last_index());
+        let new_commit_index = self.peer_manager.quorum_match_index(
+            &self.configuration_state,
+            self.log.last_index(self.snapshot.last_included_index),
+        );
         if new_commit_index <= self.commit_index {
             return;
         }
@@ -328,7 +332,7 @@ impl Consensus {
                     self.apply_configuration(configuration.clone(), true);
 
                     if configuration.is_configuration_old_new() {
-                        info!("Append new_configuration entry when old_new_configuration commited, old_new_configuration: {:?}", entry);
+                        info!("Append new_configuration entry when old_new_configuration commited, old_new_configuration: {:?}", &configuration);
                         self.append_configuration(None);
                     }
                 }
@@ -442,24 +446,6 @@ impl Consensus {
         self.snapshot_timer.lock().unwrap().stop();
     }
 
-    fn apply_configuration_(&mut self, configuration: Configuration) {
-        // Update the peers' list
-        let mut new_peers = Vec::new();
-        for server_info in configuration.new_servers.iter() {
-            if !self.peer_manager.contains(server_info.0) && server_info.0 != self.server_id {
-                new_peers.push(Peer::new(server_info.0, server_info.1.clone()));
-            }
-        }
-        self.peer_manager.add_peers(new_peers);
-
-        // Update the node configuration
-        for peer in self.peer_manager.peers_mut().iter_mut() {
-            let _ =
-                peer.configuration_state == configuration.query_configuration_state(peer.server_id);
-        }
-        let _ = self.configuration_state = configuration.query_configuration_state(self.server_id);
-    }
-
     // Append configuration item
     fn append_configuration(&mut self, new_servers: Option<&Vec<Server>>) -> bool {
         return match new_servers {
@@ -480,15 +466,25 @@ impl Consensus {
             // Append new_configuration
             None => {
                 let old_new_configuration = self.log.last_configuration();
-                if !old_new_configuration.is_configuration_old_new() {
-                    panic!("There is no old_new_configuration before append new configuration.");
-                }
 
-                let new_configuration = old_new_configuration.gen_new_configuration();
-
-                match self.replicate(EntryType::Configuration, new_configuration.to_data()) {
-                    Ok(_) => true,
-                    Err(_) => false,
+                match old_new_configuration {
+                    None => {
+                        panic!(
+                            "There is no old_new_configuration before append new configuration."
+                        );
+                    }
+                    Some(old_new_configuration) => {
+                        if !old_new_configuration.is_configuration_old_new() {
+                            panic!("There is no old_new_configuration before append new configuration.")
+                        }
+                        let new_configuration = old_new_configuration.gen_new_configuration();
+                        return match self
+                            .replicate(EntryType::Configuration, new_configuration.to_data())
+                        {
+                            Ok(_) => true,
+                            Err(_) => false,
+                        };
+                    }
                 }
             }
         };
@@ -539,9 +535,31 @@ impl Consensus {
     }
 
     pub fn handle_snapshot_timeout(&mut self) {
-        if self.state == State::Leader {
-            info!("Handle snapshot timeout.");
-            self.install_snapshot();
+        if self.log.committed_entries_len(self.commit_index) > config::SNAPSHOT_LOG_LENGTH_THRESHOLD
+        {
+            info!("Start to take snapshot.");
+            let last_included_index = self.log.last_index(self.snapshot.last_included_index);
+            let last_included_term = self.log.last_term(self.snapshot.last_included_term);
+            let configuration = self.log.last_configuration();
+
+            // Write snapshot
+            let snapshot_filepath = self
+                .snapshot
+                .gen_snapshot_filepath(last_included_index, last_included_term);
+            info!("Snapshot filepath: {}", &snapshot_filepath);
+            self.state_machine.take_snapshot(snapshot_filepath.clone());
+            if !std::path::Path::new(&snapshot_filepath).exists() {
+                error!("State machine failed to take snapshot.");
+                return;
+            }
+            info!("Success to take snapshot, filepath: {}.", snapshot_filepath);
+            self.snapshot.take_snapshot_metadata(
+                last_included_index,
+                last_included_term,
+                configuration,
+            );
+
+            self.log.truncate_prefix(last_included_index);
         }
     }
 
@@ -577,11 +595,11 @@ impl Consensus {
             );
         }
 
-        if request.prev_log_index > self.log.last_index() {
+        if request.prev_log_index > self.log.last_index(self.snapshot.last_included_index) {
             warn!(
                 "Reject append entries because prev_log_index {} is greater than last index {}.",
                 request.prev_log_index,
-                self.log.last_index()
+                self.log.last_index(self.snapshot.last_included_index)
             );
             return refuse_response;
         }
@@ -619,7 +637,7 @@ impl Consensus {
             if index < self.log.start_index() {
                 continue;
             }
-            if self.log.last_index() >= index {
+            if self.log.last_index(0) >= index {
                 let log_entry = self.log.entry(index).unwrap();
                 if log_entry.term == entry.term {
                     continue;
@@ -690,9 +708,10 @@ impl Consensus {
             }
         }
 
-        let log_is_ok = request.term > self.log.last_term()
-            || (request.term == self.log.last_term()
-            && request.last_log_index >= self.log.last_index());
+        let log_is_ok = request.term > self.log.last_term(self.snapshot.last_included_term)
+            || (request.term == self.log.last_term(self.snapshot.last_included_term)
+            && request.last_log_index
+            >= self.log.last_index(self.snapshot.last_included_index));
         if !log_is_ok {
             return refuse_response;
         }
@@ -800,8 +819,7 @@ impl Consensus {
 
         let last_configuration = self.log.last_configuration();
 
-        if !last_configuration.old_servers.is_empty() && !last_configuration.new_servers.is_empty()
-        {
+        if last_configuration.is_some() && last_configuration.unwrap().is_configuration_old_new() {
             return refuse_reply;
         }
 
