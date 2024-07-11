@@ -3,7 +3,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hello World!");
 
     let mut client =
-        raft_rust::proto::management_rpc_client::ManagementRpcClient::connect("http://[::1]:9092")
+        raft_rust::proto::management_rpc_client::ManagementRpcClient::connect("http://[::1]:9091")
             .await?;
     let set_configuration_request =
         tonic::Request::new(raft_rust::proto::SetConfigurationRequest {

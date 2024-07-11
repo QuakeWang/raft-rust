@@ -2,6 +2,8 @@ use crate::config::Configuration;
 use crate::proto;
 use crate::proto::LogEntry;
 use log::error;
+use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 use std::sync::Mutex;
 
 lazy_static::lazy_static! {
@@ -15,18 +17,21 @@ lazy_static::lazy_static! {
 
 pub type LogEntryData = (proto::EntryType, Vec<u8>);
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Log {
     entries: Vec<LogEntry>,
     start_index: u64,
+    metadata_dir: String,
+    #[serde(skip)]
     append_mutex: Mutex<String>,
 }
 
 impl Log {
-    pub fn new(start_index: u64) -> Self {
+    pub fn new(start_index: u64, metadata_dir: String) -> Self {
         Self {
             entries: Vec::new(),
             start_index,
+            metadata_dir,
             append_mutex: Mutex::new("".to_string()),
         }
     }
@@ -43,6 +48,7 @@ impl Log {
                 };
                 self.entries.push(entry);
             }
+            self.dump();
         } else {
             error!("Append log entry failed due to lock failure!");
             return;
@@ -55,6 +61,7 @@ impl Log {
             for entry in entries {
                 self.entries.push(entry);
             }
+            self.dump();
         } else {
             error!("Append log entry failed due to lock failure!");
             return;
@@ -129,6 +136,7 @@ impl Log {
         }
         self.entries
             .truncate((last_index_kept - self.start_index + 1) as usize);
+        self.dump();
     }
 
     pub fn truncate_prefix(&mut self, last_included_index: u64) {
@@ -138,6 +146,7 @@ impl Log {
         self.entries
             .drain(0..(last_included_index - self.start_index + 1) as usize);
         self.start_index = last_included_index + 1;
+        self.dump();
     }
 
     pub fn committed_entries_len(&self, commit_index: u64) -> usize {
@@ -155,13 +164,42 @@ impl Log {
         }
         None
     }
+
+    pub fn gen_log_filepath(metadata_dir: &String) -> String {
+        format!("{}/raft.log", metadata_dir)
+    }
+
+    pub fn reload(&mut self) {
+        let filepath = Log::gen_log_filepath(&self.metadata_dir);
+        if std::path::Path::new(&filepath).exists() {
+            let mut log_file = std::fs::File::open(filepath).unwrap();
+            let mut log_json = String::new();
+            log_file
+                .read_to_string(&mut log_json)
+                .expect("Failed to read raft log.");
+            let log: Log = serde_json::from_str(log_json.as_str()).unwrap();
+            self.entries = log.entries;
+            self.start_index = log.start_index;
+        }
+    }
+
+    // Save log to disk
+    pub fn dump(&self) {
+        let log_filepath = Log::gen_log_filepath(&self.metadata_dir);
+        let mut log_file = std::fs::File::create(log_filepath).unwrap();
+        let log_json = serde_json::to_string(self).unwrap();
+        if let Err(e) = log_file.write(log_json.as_bytes()) {
+            panic!("Failed to write raft log, error: {}", e)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn test_log() {
-        let mut log = super::Log::new(1);
+        let mut log = super::Log::new(1, "./test".to_string());
+
         log.append_data(
             1,
             vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],
@@ -184,25 +222,28 @@ mod tests {
     }
 
     #[test]
-    fn test_log_truncate() {
-        let mut log = super::Log::new(1);
+    fn test_truncate_suffix() {
+        let mut log = super::Log::new(2, "./test".to_string());
         log.append_data(
             1,
             vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],
         );
-
         log.append_data(
             1,
             vec![(super::proto::EntryType::Data, "test2".as_bytes().to_vec())],
         );
+        log.append_data(
+            1,
+            vec![(super::proto::EntryType::Data, "test3".as_bytes().to_vec())],
+        );
 
-        log.truncate_suffix(1);
-        assert_eq!(log.entries().len(), 1);
+        log.truncate_suffix(3);
+        assert_eq!(log.entries().len(), 2);
     }
 
     #[test]
-    fn test_log_truncate_prefix() {
-        let mut log = super::Log::new(1);
+    fn test_truncate_prefix() {
+        let mut log = super::Log::new(1, "./test".to_string());
         log.append_data(
             1,
             vec![(super::proto::EntryType::Data, "test1".as_bytes().to_vec())],

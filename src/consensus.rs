@@ -1,4 +1,4 @@
-use crate::config::{Configuration, ConfigurationState, ServerInfo};
+use crate::config::{Configuration, ConfigurationState};
 use crate::log::Log;
 use crate::metadata::Metadata;
 use crate::peer::{Peer, PeerManager};
@@ -56,7 +56,7 @@ impl Consensus {
         let mut consensus = Self {
             server_id,
             server_addr: format!("127.0.0.1:{}", port),
-            metadata: Metadata::reload(metadata_dir),
+            metadata: Metadata::new(metadata_dir.clone()),
             state: State::Follower,
             election_timer: Arc::new(Mutex::new(Timer::new("ElectionTimer"))),
             heartbeat_timer: Arc::new(Mutex::new(Timer::new("HeartbeatTimer"))),
@@ -66,7 +66,7 @@ impl Consensus {
             last_applied: 0,
             leader_id: config::NONE_SERVER_ID,
             peer_manager: PeerManager::new(),
-            log: Log::new(1),
+            log: Log::new(1, metadata_dir),
             snapshot: snapshot::Snapshot::new(snapshot_dir),
             configuration_state: ConfigurationState::new(),
             rpc_client: Client {},
@@ -74,6 +74,13 @@ impl Consensus {
             state_machine,
         };
 
+        // load raft metadata
+        consensus.metadata.reload();
+
+        // load raft log
+        consensus.log.reload();
+
+        // load snapshot metadata
         consensus.snapshot.reload_metadata();
 
         // load snapshot to state machine
@@ -264,7 +271,7 @@ impl Consensus {
 
     // TODO Install snapshot to other peers
     fn install_snapshot(&mut self) {
-        todo!()
+        unimplemented!()
     }
 
     fn step_down(&mut self, new_term: u64) {
@@ -404,9 +411,13 @@ impl Consensus {
                 // Add a new peer node
                 let mut new_peers = Vec::new();
                 for server_info in configuration.new_servers.iter() {
-                    if !self.peer_manager.contains(server_info.0) && server_info.0 != self.server_id
+                    if !self.peer_manager.contains(server_info.server_id)
+                        && server_info.server_id != self.server_id
                     {
-                        new_peers.push(Peer::new(server_info.0, server_info.1.clone()));
+                        new_peers.push(Peer::new(
+                            server_info.server_id,
+                            server_info.server_addr.clone(),
+                        ));
                     }
                 }
                 self.peer_manager.add_peers(new_peers);
@@ -467,9 +478,10 @@ impl Consensus {
                 let mut old_new_configuration = Configuration::new();
                 old_new_configuration.append_new_servers(servers);
                 old_new_configuration.append_old_servers(self.peer_manager.peers());
-                old_new_configuration
-                    .old_servers
-                    .push(ServerInfo(self.server_id, self.server_addr.clone()));
+                old_new_configuration.old_servers.push(Server {
+                    server_id: self.server_id,
+                    server_addr: self.server_addr.clone(),
+                });
 
                 match self.replicate(EntryType::Configuration, old_new_configuration.to_data()) {
                     Ok(_) => true,

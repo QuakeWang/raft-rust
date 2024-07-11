@@ -10,27 +10,27 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    pub fn reload(metadata_dir: String) -> Metadata {
-        let filepath = Metadata::gen_metadata_filepath(&metadata_dir);
-        return if std::path::Path::new(&filepath).exists() {
+    pub fn new(metadata_dir: String) -> Self {
+        Self {
+            current_term: 0,
+            voted_for: config::NONE_SERVER_ID,
+            metadata_dir,
+        }
+    }
+
+    // Create it or load from disk
+    pub fn reload(&mut self) {
+        let filepath = Metadata::gen_metadata_filepath(&self.metadata_dir);
+        if std::path::Path::new(&filepath).exists() {
             let mut metadata_file = std::fs::File::open(filepath).unwrap();
             let mut metadata_json = String::new();
             metadata_file
                 .read_to_string(&mut metadata_json)
                 .expect("Failed to read raft metadata file.");
             let metadata: Metadata = serde_json::from_str(metadata_json.as_str()).unwrap();
-            Metadata {
-                current_term: metadata.current_term,
-                voted_for: metadata.voted_for,
-                metadata_dir,
-            }
-        } else {
-            Metadata {
-                current_term: 0,
-                voted_for: config::NONE_SERVER_ID,
-                metadata_dir,
-            }
-        };
+            self.current_term = metadata.current_term;
+            self.voted_for = metadata.voted_for;
+        }
     }
 
     pub fn gen_metadata_filepath(metadata_dir: &String) -> String {

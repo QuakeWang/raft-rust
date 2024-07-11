@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 
 #[derive(Debug)]
 struct MyStateMachine {
@@ -18,7 +18,16 @@ impl raft_rust::state_machine::StateMachine for MyStateMachine {
         }
     }
 
-    fn restore_snapshot(&mut self, _snapshot_filepath: String) {}
+    fn restore_snapshot(&mut self, snapshot_filepath: String) {
+        if std::path::Path::new(&snapshot_filepath).exists() {
+            let mut snapshot_file = std::fs::File::open(snapshot_filepath.clone()).unwrap();
+            let mut snapshot_json = String::new();
+            if let Err(e) = snapshot_file.read_to_string(&mut snapshot_json) {
+                panic!("Failed to read snapshot file, err: {}.", e);
+            }
+            self.data = serde_json::from_str(&snapshot_json).unwrap();
+        }
+    }
 }
 
 fn main() {

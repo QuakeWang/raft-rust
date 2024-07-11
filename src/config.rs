@@ -42,8 +42,8 @@ pub struct ServerInfo(pub u64, pub String);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Configuration {
-    pub old_servers: Vec<ServerInfo>,
-    pub new_servers: Vec<ServerInfo>,
+    pub old_servers: Vec<proto::Server>,
+    pub new_servers: Vec<proto::Server>,
 }
 
 impl Configuration {
@@ -64,15 +64,16 @@ impl Configuration {
 
     pub fn append_new_servers(&mut self, new_servers: &Vec<proto::Server>) {
         for server in new_servers.iter() {
-            self.new_servers
-                .push(ServerInfo(server.server_id, server.server_addr.clone()));
+            self.new_servers.push(server.clone());
         }
     }
 
     pub fn append_old_servers(&mut self, peers: Vec<&Peer>) {
         for peer in peers.iter() {
-            self.old_servers
-                .push(ServerInfo(peer.server_id, peer.server_addr.clone()));
+            self.old_servers.push(proto::Server {
+                server_id: peer.server_id,
+                server_addr: peer.server_addr.clone(),
+            });
         }
     }
 
@@ -91,12 +92,12 @@ impl Configuration {
             in_new: self
                 .new_servers
                 .iter()
-                .find(|new_server| new_server.0 == server_id)
+                .find(|new_server| new_server.server_id == server_id)
                 .is_some(),
             in_old: self
                 .old_servers
                 .iter()
-                .find(|old_server| old_server.0 == server_id)
+                .find(|old_server| old_server.server_id == server_id)
                 .is_some(),
         }
     }
@@ -117,12 +118,14 @@ mod tests {
     #[test]
     fn test_configuration() {
         let mut configuration = super::Configuration::new();
-        configuration
-            .old_servers
-            .push(super::ServerInfo(1, "[::1]:9001".to_string()));
-        configuration
-            .new_servers
-            .push(super::ServerInfo(2, "[::1]:9002".to_string()));
+        configuration.old_servers.push(crate::proto::Server {
+            server_id: 1,
+            server_addr: "[::1]:9091".to_string(),
+        });
+        configuration.new_servers.push(crate::proto::Server {
+            server_id: 2,
+            server_addr: "[::1]:9092".to_string(),
+        });
 
         let ser_data = configuration.to_data();
         let de_configuration = super::Configuration::from_data(&ser_data);
