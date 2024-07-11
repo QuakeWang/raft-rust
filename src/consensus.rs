@@ -1,5 +1,6 @@
 use crate::config::{Configuration, ConfigurationState, ServerInfo};
 use crate::log::Log;
+use crate::metadata::Metadata;
 use crate::peer::{Peer, PeerManager};
 use crate::proto::{
     AppendEntriesRequest, AppendEntriesResponse, EntryType, GetConfigurationRequest,
@@ -24,7 +25,7 @@ pub enum State {
 pub struct Consensus {
     pub server_id: u64,
     pub server_addr: String,
-    pub current_term: u64,
+    pub metadata: Metadata, // load raft metadata
     pub state: State,
     pub voted_for: u64,
     pub commit_index: u64,
@@ -49,12 +50,13 @@ impl Consensus {
         peers: Vec<Peer>,
         state_machine: Box<dyn state_machine::StateMachine>,
         snapshot_dir: String,
+        metadata_dir: String,
     ) -> Arc<Mutex<Self>> {
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
         let mut consensus = Self {
             server_id,
             server_addr: format!("127.0.0.1:{}", port),
-            current_term: 0,
+            metadata: Metadata::reload(metadata_dir),
             state: State::Follower,
             election_timer: Arc::new(Mutex::new(Timer::new("ElectionTimer"))),
             heartbeat_timer: Arc::new(Mutex::new(Timer::new("HeartbeatTimer"))),
@@ -71,6 +73,13 @@ impl Consensus {
             tokio_runtime,
             state_machine,
         };
+
+        consensus.snapshot.reload_metadata();
+
+        // load snapshot to state machine
+        if let Some(snapshot_filepath) = consensus.snapshot.latest_snapshot_filepath() {
+            consensus.state_machine.restore_snapshot(snapshot_filepath);
+        }
 
         consensus.peer_manager.add_peers(peers);
         Arc::new(Mutex::new(consensus))
@@ -92,7 +101,7 @@ impl Consensus {
 
         // Save the log entry
         self.log
-            .append_data(self.current_term, vec![(r#type, data.clone())]);
+            .append_data(self.metadata.current_term, vec![(r#type, data.clone())]);
 
         if r#type == EntryType::Configuration {
             self.apply_configuration(Configuration::from_data(&data), false);
@@ -146,9 +155,13 @@ impl Consensus {
         let entries_num = entries.len();
 
         let prev_log_index = peer.next_index - 1;
-        let prev_log_term = self.log.prev_log_term(prev_log_index, self.snapshot.last_included_index, self.snapshot.last_included_term);
+        let prev_log_term = self.log.prev_log_term(
+            prev_log_index,
+            self.snapshot.last_included_index,
+            self.snapshot.last_included_term,
+        );
         let request = AppendEntriesRequest {
-            term: self.current_term,
+            term: self.metadata.current_term,
             leader_id: self.server_id,
             prev_log_term,
             prev_log_index,
@@ -167,7 +180,7 @@ impl Consensus {
             }
         };
 
-        if response.term > self.current_term {
+        if response.term > self.metadata.current_term {
             self.step_down(response.term);
             return false;
         }
@@ -197,7 +210,7 @@ impl Consensus {
             let peer = self.peer_manager.peer(peer_server_id.clone()).unwrap();
             info!("Request vote to {:?}.", &peer.server_addr);
             let request = RequestVoteRequest {
-                term: self.current_term,
+                term: self.metadata.current_term,
                 candidate_id: self.server_id,
                 last_log_term: self.log.last_term(self.snapshot.last_included_term),
                 last_log_index: self.log.last_index(self.snapshot.last_included_index),
@@ -211,10 +224,10 @@ impl Consensus {
                     &peer.server_addr, &response
                 );
                 // If the peer has bigger term, then become a follower.
-                if response.term > self.current_term {
+                if response.term > self.metadata.current_term {
                     info!(
                         "Peer {} has bigger term {} than self {}.",
-                        &peer.server_addr, &response.term, self.current_term
+                        &peer.server_addr, &response.term, self.metadata.current_term
                     );
                     self.state = State::Follower;
                     return;
@@ -257,20 +270,20 @@ impl Consensus {
     fn step_down(&mut self, new_term: u64) {
         info!(
             "Step down to term {}, current term: {}",
-            new_term, self.current_term
+            new_term, self.metadata.current_term
         );
 
-        if new_term < self.current_term {
+        if new_term < self.metadata.current_term {
             error!(
                 "New term {} is smaller than current term {}.",
-                new_term, self.current_term
+                new_term, self.metadata.current_term
             );
             return;
         }
         self.state = State::Follower;
-        if new_term > self.current_term {
-            self.current_term = new_term;
-            self.voted_for = config::NONE_SERVER_ID;
+        if new_term > self.metadata.current_term {
+            self.metadata.update_current_term(new_term);
+            self.metadata.update_voted_for(config::NONE_SERVER_ID);
             self.leader_id = config::NONE_SERVER_ID;
         } else {
             // Case: new_term == self.current_term
@@ -504,8 +517,9 @@ impl Consensus {
                 // Candidate election again
                 info!("Start election again.");
 
-                self.current_term += 1;
-                self.voted_for = self.server_id; // Vote for self
+                self.metadata
+                    .update_current_term(self.metadata.current_term + 1);
+                self.metadata.update_voted_for(self.server_id); // Vote for self
 
                 self.election_timer
                     .lock()
@@ -520,8 +534,9 @@ impl Consensus {
                     info!("Start election.");
 
                     self.state = State::Candidate; // Become candidate
-                    self.current_term += 1; // Increase term
-                    self.voted_for = self.server_id; // Vote for self
+                    self.metadata
+                        .update_current_term(self.metadata.current_term + 1); // Increase term
+                    self.metadata.update_voted_for(self.server_id); // Vote for self
 
                     self.election_timer
                         .lock()
@@ -568,12 +583,12 @@ impl Consensus {
         request: &AppendEntriesRequest,
     ) -> AppendEntriesResponse {
         let refuse_response = AppendEntriesResponse {
-            term: self.current_term,
+            term: self.metadata.current_term,
             success: false,
         };
 
         // Compare the request term with the current term.
-        if request.term < self.current_term {
+        if request.term < self.metadata.current_term {
             return refuse_response;
         }
 
@@ -621,7 +636,7 @@ impl Consensus {
             info!("Receive heartbeat from leader {}.", request.leader_id);
             self.follower_advance_commit_index(request.leader_commit);
             return AppendEntriesResponse {
-                term: self.current_term,
+                term: self.metadata.current_term,
                 success: true,
             };
         }
@@ -671,14 +686,14 @@ impl Consensus {
         self.follower_advance_commit_index(request.leader_commit);
 
         AppendEntriesResponse {
-            term: self.current_term,
+            term: self.metadata.current_term,
             success: true,
         }
     }
 
     pub fn handle_request_vote(&mut self, request: &RequestVoteRequest) -> RequestVoteResponse {
         let refuse_response = RequestVoteResponse {
-            term: self.current_term,
+            term: self.metadata.current_term,
             vote_granted: false,
         };
 
@@ -686,10 +701,10 @@ impl Consensus {
             return refuse_response;
         }
 
-        if request.term < self.current_term {
+        if request.term < self.metadata.current_term {
             info!(
                 "Refuse request vote, because request term {} is smaller than current term {}.",
-                request.term, self.current_term
+                request.term, self.metadata.current_term
             );
             return refuse_response;
         }
@@ -700,7 +715,7 @@ impl Consensus {
             }
         }
 
-        if request.term > self.current_term {
+        if request.term > self.metadata.current_term {
             self.step_down(request.term);
         } else {
             if self.state == State::Leader || self.state == State::Candidate {
@@ -710,8 +725,8 @@ impl Consensus {
 
         let log_is_ok = request.term > self.log.last_term(self.snapshot.last_included_term)
             || (request.term == self.log.last_term(self.snapshot.last_included_term)
-            && request.last_log_index
-            >= self.log.last_index(self.snapshot.last_included_index));
+                && request.last_log_index
+                    >= self.log.last_index(self.snapshot.last_included_index));
         if !log_is_ok {
             return refuse_response;
         }
@@ -741,7 +756,7 @@ impl Consensus {
         }
 
         info!("Agree vote for server id {}.", request.candidate_id);
-        self.voted_for = request.candidate_id;
+        self.metadata.update_voted_for(request.candidate_id);
 
         self.election_timer
             .lock()

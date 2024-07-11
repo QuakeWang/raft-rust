@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 mod config;
 pub mod consensus;
 mod log;
+mod metadata;
 pub mod peer;
 pub mod proto;
 mod rpc;
@@ -19,6 +20,7 @@ pub fn start(
     peers: Vec<peer::Peer>,
     state_machine: Box<dyn state_machine::StateMachine>,
     snapshot_dir: String,
+    metadata_dir: String,
 ) -> Arc<Mutex<Consensus>> {
     // TODO: Add config log
     if std::env::var_os("RUST_LOG").is_none() {
@@ -26,14 +28,27 @@ pub fn start(
     }
     env_logger::init();
 
-    // If snapshot dir does not exist, create it.
-    if !std::path::Path::new(&snapshot_dir).exists() {
-        if let Err(e) = std::fs::create_dir_all(snapshot_dir.clone()) {
-            panic!("Create snapshot dir failed: {}", e);
+    if !std::path::Path::new(&metadata_dir).exists() {
+        if let Err(e) = std::fs::create_dir_all(metadata_dir.clone()) {
+            panic!("Create metadata dir failed, error: {}", e);
         }
     }
 
-    let consensus = Consensus::new(server_id, port, peers, state_machine, snapshot_dir);
+    // If snapshot dir does not exist, create it.
+    if !std::path::Path::new(&snapshot_dir).exists() {
+        if let Err(e) = std::fs::create_dir_all(snapshot_dir.clone()) {
+            panic!("Create snapshot dir failed, error: {}", e);
+        }
+    }
+
+    let consensus = Consensus::new(
+        server_id,
+        port,
+        peers,
+        state_machine,
+        snapshot_dir,
+        metadata_dir,
+    );
 
     let consensus_clone = consensus.clone();
     std::thread::spawn(move || {

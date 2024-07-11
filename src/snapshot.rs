@@ -1,7 +1,7 @@
 use crate::config;
 use log::info;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{Read, Write};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Snapshot {
@@ -45,6 +45,86 @@ impl Snapshot {
             "Take snapshot metadata successfully, metadata_filepath: {}",
             metadata_filepath
         );
+    }
+
+    pub fn reload_metadata(&mut self) {
+        if let Some(filepath) = self.latest_metadata_filepath() {
+            let mut metadata_file = std::fs::File::open(filepath).unwrap();
+            let mut metadata_json = String::new();
+            metadata_file
+                .read_to_string(&mut metadata_json)
+                .expect("Failed to read snapshot metadata.");
+            let snapshot: Snapshot = serde_json::from_str(metadata_json.as_str()).unwrap();
+
+            self.last_included_index = snapshot.last_included_index;
+            self.last_included_term = snapshot.last_included_term;
+            self.configuration = snapshot.configuration;
+        } else {
+            info!("No snapshot file found when reloading.")
+        }
+    }
+
+    pub fn latest_snapshot_filepath(&mut self) -> Option<String> {
+        let result = std::fs::read_dir(self.snapshot_dir.clone()).unwrap();
+        let mut latest_index_term: (u64, u64) = (0, 0);
+        for entry in result {
+            let entry = entry.unwrap();
+            let filename = entry.file_name();
+            let filename = filename.to_str().unwrap();
+            if filename.ends_with(".snapshot") {
+                let re = regex::Regex::new(r"raft-(\d+)-(\d+).snapshot").unwrap();
+                let cap = re.captures(filename).unwrap();
+
+                let index = cap.get(1).unwrap().as_str().parse::<u64>().unwrap();
+                let term = cap.get(2).unwrap().as_str().parse::<u64>().unwrap();
+
+                if index > latest_index_term.0
+                    || (index == latest_index_term.0 && term > latest_index_term.1)
+                {
+                    latest_index_term = (index, term);
+                }
+            }
+        }
+        return if latest_index_term.0 != 0 && latest_index_term.1 != 0 {
+            Some(format!(
+                "{}/raft-{}-{}.snapshot",
+                &self.snapshot_dir, latest_index_term.0, latest_index_term.1
+            ))
+        } else {
+            None
+        };
+    }
+
+    pub fn latest_metadata_filepath(&mut self) -> Option<String> {
+        let result = std::fs::read_dir(self.snapshot_dir.clone()).unwrap();
+        let mut latest_index_term: (u64, u64) = (0, 0);
+        for entry in result {
+            let entry = entry.unwrap();
+            let filename = entry.file_name();
+            let filename = filename.to_str().unwrap();
+
+            if filename.ends_with(".snapshot.metadata") {
+                let re = regex::Regex::new(r"raft-(\d+)-(\d+).snapshot.metadata").unwrap();
+                let cap = re.captures(filename).unwrap();
+
+                let index = cap.get(1).unwrap().as_str().parse::<u64>().unwrap();
+                let term = cap.get(2).unwrap().as_str().parse::<u64>().unwrap();
+
+                if index > latest_index_term.0
+                    || (index == latest_index_term.0 && term > latest_index_term.1)
+                {
+                    latest_index_term = (index, term);
+                }
+            }
+        }
+        return if latest_index_term.0 != 0 && latest_index_term.1 != 0 {
+            Some(format!(
+                "{}/raft-{}-{}.snapshot.metadata",
+                &self.snapshot_dir, latest_index_term.0, latest_index_term.1
+            ))
+        } else {
+            None
+        };
     }
 
     pub fn gen_snapshot_filepath(

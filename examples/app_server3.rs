@@ -31,9 +31,14 @@ fn main() {
     let snapshot_dir = format!(
         "{}/{}",
         std::env::current_dir().unwrap().to_str().unwrap(),
-        "./app_server3/".to_string()
+        ".snapshot/app_server3"
     );
-    let consensus = raft_rust::start(3, 9093, peers, state_machine, snapshot_dir);
+    let metadata_dir = format!(
+        "{}/{}",
+        std::env::current_dir().unwrap().to_str().unwrap(),
+        ".metadata/app_server3"
+    );
+    let consensus = raft_rust::start(3, 9093, peers, state_machine, snapshot_dir, metadata_dir);
     let mut count = 0;
 
     loop {
