@@ -148,4 +148,26 @@ impl Snapshot {
             self.snapshot_dir, last_included_index, last_included_term
         )
     }
+
+    pub fn gen_tmp_snapshot_filepath(
+        &self,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) -> String {
+        format!(
+            "{}/raft-{}-{}.snapshot.tmp",
+            self.snapshot_dir, last_included_index, last_included_term
+        )
+    }
+
+    pub fn gen_tmp_snapshot_metadata_filepath(
+        &self,
+        last_included_index: u64,
+        last_included_term: u64,
+    ) -> String {
+        format!(
+            "{}/raft-{}-{}.snapshot.metadata.tmp",
+            self.snapshot_dir, last_included_index, last_included_term
+        )
+    }
 }

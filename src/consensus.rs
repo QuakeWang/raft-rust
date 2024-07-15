@@ -6,12 +6,13 @@ use crate::proto::{
     AppendEntriesRequest, AppendEntriesResponse, EntryType, GetConfigurationRequest,
     GetConfigurationResponse, GetLeaderRequest, GetLeaderResponse, InstallSnapshotRequest,
     InstallSnapshotResponse, RequestVoteRequest, RequestVoteResponse, Server,
-    SetConfigurationRequest, SetConfigurationResponse,
+    SetConfigurationRequest, SetConfigurationResponse, SnapshotDataType,
 };
 use crate::rpc::Client;
 use crate::timer::Timer;
-use crate::{config, snapshot, state_machine, util};
+use crate::{config, proto, snapshot, state_machine, util};
 use log::{error, info, warn};
+use std::io::{Read, Seek, Write};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, PartialEq)]
@@ -147,17 +148,24 @@ impl Consensus {
         true
     }
 
-    fn append_entries_to_peer(&mut self, peer_server_id: u64, heartbeat: bool) -> bool {
-        let peer = match self.peer_manager.peer(peer_server_id) {
+    fn append_entries_to_peer(&mut self, peer_id: u64, heartbeat: bool) -> bool {
+        let peer = match self.peer_manager.peer(peer_id) {
             None => {
                 warn!(
                     "Peer {} not found in peer_manager when append entries.",
-                    peer_server_id
+                    peer_id
                 );
                 return false;
             }
             Some(peer) => peer,
         };
+
+        let need_install_snapshot = !heartbeat && peer.next_index < self.log.start_index();
+        if need_install_snapshot {
+            info!("Change to install snapshot for peer {}.", peer_id);
+            self.install_snapshot(peer_id);
+            return true;
+        }
 
         let entries = match heartbeat {
             true => self.log.pack_entries(peer.next_index),
@@ -274,9 +282,166 @@ impl Consensus {
         }
     }
 
-    // TODO Install snapshot to other peers
-    fn install_snapshot(&mut self) {
-        unimplemented!()
+    fn install_snapshot(&mut self, peer_id: u64) {
+        let peer = self.peer_manager.peer(peer_id).unwrap();
+
+        let metadata_filepath = match self.snapshot.latest_metadata_filepath() {
+            None => {
+                return;
+            }
+            Some(filepath) => filepath,
+        };
+
+        let snapshot_filepath = match self.snapshot.latest_snapshot_filepath() {
+            None => {
+                return;
+            }
+            Some(filepath) => filepath,
+        };
+
+        let mut medata_file = std::fs::File::open(metadata_filepath.clone()).unwrap();
+        let mut snapshot_file = std::fs::File::open(snapshot_filepath.clone()).unwrap();
+        let metadata_size = medata_file.metadata().unwrap().len();
+        let snapshot_size = snapshot_file.metadata().unwrap().len();
+        info!(
+            "Install snapshot to peer {}, metadata_filepath: {}, metadata_size: {}, snapshot_filepath: {}, snapshot_size: {}.",
+            peer_id, &metadata_filepath, metadata_size, &snapshot_filepath, snapshot_size
+        );
+
+        let mut offset = 0;
+        let mut is_metadata_done = false;
+        let mut is_done = false;
+
+        // Loop to send snapshot metadata.
+        loop {
+            let mut data: Vec<u8> = {
+                if offset + (config::SNAPSHOT_TRUNK_SIZE as u64) < metadata_size {
+                    vec![0u8; config::SNAPSHOT_TRUNK_SIZE]
+                } else {
+                    is_metadata_done = true;
+                    vec![0u8; (metadata_size - offset) as usize]
+                }
+            };
+
+            let data_cap = data.capacity();
+
+            if let Err(e) = medata_file.seek(std::io::SeekFrom::Start(offset)) {
+                error!(
+                    "Install snapshot to {:?}, failed to seek, error: {}.",
+                    &peer.server_addr, e
+                );
+                break;
+            }
+
+            if let Err(e) = medata_file.read_exact(&mut data) {
+                error!(
+                    "Install snapshot to {:?}, failed to read_exact, error : {}",
+                    &peer.server_addr, e
+                );
+                break;
+            }
+
+            let request = InstallSnapshotRequest {
+                term: self.metadata.current_term,
+                leader_id: self.server_id,
+                last_included_index: self.snapshot.last_included_index,
+                last_included_term: self.snapshot.last_included_term,
+                offset,
+                data,
+                r#type: proto::SnapshotDataType::Metadata.into(),
+                done: is_done,
+            };
+
+            match self.tokio_runtime.block_on(
+                self.rpc_client
+                    .install_snapshot(request, peer.server_addr.clone()),
+            ) {
+                Ok(response) => {
+                    if response.term > self.metadata.current_term {
+                        self.step_down(response.term);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Install snapshot to {:?}, failed to send rpc, error: {}.",
+                        &peer.server_addr, e
+                    );
+                    return;
+                }
+            }
+
+            // Update offset
+            offset += data_cap as u64;
+            if is_metadata_done && is_done {
+                break;
+            }
+        }
+
+        // Loop to send snapshot.
+        loop {
+            let mut data: Vec<u8> = {
+                if offset + (config::SNAPSHOT_TRUNK_SIZE as u64) < snapshot_size {
+                    vec![0u8; config::SNAPSHOT_TRUNK_SIZE]
+                } else {
+                    is_done = true;
+                    vec![0u8; (snapshot_size - (offset - metadata_size)) as usize]
+                }
+            };
+
+            let data_cap = data.capacity();
+
+            if let Err(e) = snapshot_file.seek(std::io::SeekFrom::Start(offset - metadata_size)) {
+                error!(
+                    "Install snapshot to {:?}, failed to seek, error: {}.",
+                    &peer.server_addr, e
+                );
+                break;
+            }
+            if let Err(e) = snapshot_file.read_exact(&mut data) {
+                error!(
+                    "Install snapshot to {:?} failed to read_exact, error : {}",
+                    &peer.server_addr, e
+                );
+            }
+
+            let request = InstallSnapshotRequest {
+                term: self.metadata.current_term,
+                leader_id: self.server_id,
+                last_included_index: self.snapshot.last_included_index,
+                last_included_term: self.snapshot.last_included_term,
+                offset,
+                data,
+                r#type: proto::SnapshotDataType::Snapshot.into(),
+                done: is_done,
+            };
+
+            match self.tokio_runtime.block_on(
+                self.rpc_client
+                    .install_snapshot(request, peer.server_addr.clone()),
+            ) {
+                Ok(response) => {
+                    // If the peer has bigger term, then become a follower.
+                    if response.term > self.metadata.current_term {
+                        self.step_down(response.term);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Install snapshot to {:?} failed to send rpc, error: {}.",
+                        &peer.server_addr, e
+                    );
+                    return;
+                }
+            }
+            if is_done {
+                // Set next_index to the last index of the snapshot
+                peer.next_index = self.snapshot.last_included_index + 1;
+                break;
+            }
+            offset += data_cap as u64;
+        }
     }
 
     fn step_down(&mut self, new_term: u64) {
@@ -793,11 +958,101 @@ impl Consensus {
 
     pub fn handle_install_snapshot(
         &mut self,
-        _request: InstallSnapshotRequest,
+        request: InstallSnapshotRequest,
     ) -> InstallSnapshotResponse {
-        info!("Handle install snapshot");
-        let reply = InstallSnapshotResponse { term: 1 };
-        reply
+        if request.term < self.metadata.current_term {
+            info!(
+                "Refuse snapshot from {} due to leader's term is smaller.",
+                request.leader_id
+            );
+            return InstallSnapshotResponse {
+                term: self.metadata.current_term,
+            };
+        }
+
+        self.step_down(request.term);
+
+        // Update the leader
+        if self.leader_id == config::NONE_SERVER_ID {
+            info!("Update leader id to {}.", request.leader_id);
+            self.leader_id = request.leader_id;
+        }
+        if self.leader_id != request.leader_id {
+            error!(
+                "There are more than one leader id, current: {}, new: {}.",
+                self.leader_id, request.leader_id
+            );
+        }
+
+        // Write to the tmp file
+        let tmp_metadata_filepath = self.snapshot.gen_snapshot_metadata_filepath(
+            request.last_included_index,
+            request.last_included_term,
+        );
+        let tmp_snapshot_filepath = self
+            .snapshot
+            .gen_tmp_snapshot_filepath(request.last_included_index, request.last_included_term);
+        let mut tmp_metadata_file;
+        let mut tmp_snapshot_file;
+
+        if request.offset == 0 {
+            // Create the tmp file
+            tmp_metadata_file = std::fs::File::create(&tmp_metadata_filepath).unwrap();
+            tmp_snapshot_file = std::fs::File::create(&tmp_snapshot_filepath).unwrap();
+        } else {
+            // Open the file
+            tmp_metadata_file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&tmp_metadata_filepath)
+                .unwrap();
+            tmp_snapshot_file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&tmp_snapshot_filepath)
+                .unwrap();
+        }
+
+        match request.r#type() {
+            SnapshotDataType::Metadata => {
+                tmp_metadata_file.write(&request.data).unwrap();
+            }
+            SnapshotDataType::Snapshot => {
+                tmp_snapshot_file.write(&request.data).unwrap();
+            }
+        }
+
+        if request.done {
+            let metadata_filepath = self.snapshot.gen_snapshot_metadata_filepath(
+                request.last_included_index,
+                request.last_included_term,
+            );
+            let snapshot_filepath = self
+                .snapshot
+                .gen_snapshot_filepath(request.last_included_index, request.last_included_term);
+            if let Err(e) = std::fs::rename(tmp_metadata_filepath, metadata_filepath) {
+                error!("Failed to rename tmp file to snapshot file, error: {}.", e);
+                return InstallSnapshotResponse {
+                    term: self.metadata.current_term,
+                };
+            }
+            if let Err(e) = std::fs::rename(tmp_snapshot_filepath, snapshot_filepath) {
+                error!("Failed to rename tmp file to snapshot file, error: {}.", e);
+                return InstallSnapshotResponse {
+                    term: self.metadata.current_term,
+                };
+            }
+
+            // Reload the metadata
+            self.snapshot.reload_metadata();
+
+            self.state_machine
+                .restore_snapshot(self.snapshot.latest_snapshot_filepath().unwrap());
+
+            self.log.truncate_prefix(self.snapshot.last_included_index);
+        }
+
+        return InstallSnapshotResponse {
+            term: self.snapshot.last_included_term,
+        };
     }
 
     pub fn handle_get_leader(&mut self, _request: &GetLeaderRequest) -> GetLeaderResponse {

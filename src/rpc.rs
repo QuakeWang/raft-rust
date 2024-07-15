@@ -223,4 +223,27 @@ impl Client {
         );
         Ok(response.into_inner())
     }
+
+    pub async fn install_snapshot(
+        &mut self,
+        request: InstallSnapshotRequest,
+        addr: String,
+    ) -> Result<InstallSnapshotResponse, Box<dyn std::error::Error>> {
+        let addr_clone = addr.clone();
+
+        let request = tonic::Request::new(request);
+        info!(
+            "Send rpc install_snapshot to {}, request: {:?}.",
+            &addr_clone, request
+        );
+
+        let mut client = proto::consensus_rpc_client::ConsensusRpcClient::connect(addr).await?;
+        let response = client.install_snapshot(request).await?;
+        info!(
+            "Send rpc install_snapshot to {}, response: {:?}.",
+            &addr_clone, response
+        );
+
+        Ok(response.into_inner())
+    }
 }
