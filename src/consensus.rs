@@ -88,7 +88,12 @@ impl Consensus {
             consensus.state_machine.restore_snapshot(snapshot_filepath);
         }
 
-        consensus.peer_manager.add_peers(peers);
+        consensus.peer_manager.add_peers(
+            peers,
+            consensus
+                .log
+                .last_index(consensus.snapshot.last_included_index),
+        );
         Arc::new(Mutex::new(consensus))
     }
 
@@ -361,6 +366,7 @@ impl Consensus {
                     info!("Apply data entry: {:?}", entry);
                     self.state_machine.apply(&entry.data);
                     self.commit_index += 1;
+                    self.last_applied = entry.index;
                 }
                 EntryType::Noop => {
                     self.commit_index += 1;
@@ -388,6 +394,7 @@ impl Consensus {
                         EntryType::Data => {
                             info!("Apply data entry: {:?}", entry);
                             self.state_machine.apply(&entry.data);
+                            self.last_applied = entry.index;
                         }
                         EntryType::Noop => {}
                     }
@@ -420,7 +427,10 @@ impl Consensus {
                         ));
                     }
                 }
-                self.peer_manager.add_peers(new_peers);
+                self.peer_manager.add_peers(
+                    new_peers,
+                    self.log.last_index(self.snapshot.last_included_index),
+                );
 
                 // Update the peers' configuration state
                 for peer in self.peer_manager.peers_mut().iter_mut() {

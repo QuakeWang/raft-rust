@@ -189,7 +189,7 @@ impl Log {
         let mut log_file = std::fs::File::create(log_filepath).unwrap();
         let log_json = serde_json::to_string(self).unwrap();
         if let Err(e) = log_file.write(log_json.as_bytes()) {
-            panic!("Failed to write raft log, error: {}", e)
+            panic!("Failed to write raft log file, error: {}.", e)
         }
     }
 }

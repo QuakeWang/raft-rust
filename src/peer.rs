@@ -33,7 +33,10 @@ impl PeerManager {
         Self { peers: Vec::new() }
     }
 
-    pub fn add_peers(&mut self, peers: Vec<Peer>) {
+    pub fn add_peers(&mut self, mut peers: Vec<Peer>, last_log_index: u64) {
+        for peer in peers.iter_mut() {
+            peer.next_index = last_log_index + 1;
+        }
         self.peers.extend(peers);
     }
 
@@ -198,7 +201,7 @@ mod tests {
             vote_granted: false,
             configuration_state: ConfigurationState::new(),
         };
-        peer_manager.add_peers(vec![peer1, peer2]);
+        peer_manager.add_peers(vec![peer1, peer2], 0);
         println!("{:?}", peer_manager);
         assert_eq!(peer_manager.peers().len(), 2);
     }
