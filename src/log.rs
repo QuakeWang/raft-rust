@@ -38,7 +38,7 @@ impl Log {
 
     pub fn append_data(&mut self, term: u64, entry_data: Vec<LogEntryData>) {
         // Prevent the insertion of duplicate log entries with the same index
-        if let Ok(_) = self.append_mutex.lock() {
+        if self.append_mutex.lock().is_ok() {
             for entry in entry_data {
                 let log_entry = LogEntry {
                     index: self.last_index(0) + 1,
@@ -51,20 +51,18 @@ impl Log {
             self.dump();
         } else {
             error!("Append log entry failed due to lock failure!");
-            return;
         }
     }
 
     pub fn append_entries(&mut self, entries: Vec<LogEntry>) {
         // Prevent the insertion of duplicate log entries with the same index
-        if let Ok(_) = self.append_mutex.lock() {
+        if self.append_mutex.lock().is_ok() {
             for entry in entries {
                 self.entries.push(entry);
             }
             self.dump();
         } else {
             error!("Append log entry failed due to lock failure!");
-            return;
         }
     }
 
@@ -159,13 +157,13 @@ impl Log {
         if commit_index < self.start_index {
             return 0;
         }
-        return (commit_index - self.start_index + 1) as usize;
+        (commit_index - self.start_index + 1) as usize
     }
 
     pub fn last_configuration(&self) -> Option<Configuration> {
         for entry in self.entries().iter().rev() {
             if entry.entry_type() == proto::EntryType::Configuration {
-                return Some(Configuration::from_data(&entry.data.as_ref()));
+                return Some(Configuration::from_data(entry.data.as_ref()));
             }
         }
         None

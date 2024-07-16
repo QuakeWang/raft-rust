@@ -52,7 +52,7 @@ impl Consensus {
         state_machine: Box<dyn state_machine::StateMachine>,
         snapshot_dir: String,
         metadata_dir: String,
-    ) -> Arc<Mutex<Self>> {
+    ) -> Self {
         let tokio_runtime = tokio::runtime::Runtime::new().unwrap();
         let mut consensus = Self {
             server_id,
@@ -95,7 +95,8 @@ impl Consensus {
                 .log
                 .last_index(consensus.snapshot.last_included_index),
         );
-        Arc::new(Mutex::new(consensus))
+
+        consensus
     }
 
     pub fn replicate(
@@ -142,7 +143,7 @@ impl Consensus {
             self.leader_advance_commit_index();
         }
         for peer_server_id in peer_server_ids.iter() {
-            self.append_entries_to_peer(peer_server_id.clone(), heartbeat);
+            self.append_entries_to_peer(*peer_server_id, heartbeat);
         }
 
         true
@@ -205,7 +206,7 @@ impl Consensus {
             return false;
         }
 
-        return match response.success {
+        match response.success {
             true => {
                 peer.match_index = prev_log_index + entries_num as u64;
                 peer.next_index = peer.match_index + 1;
@@ -218,7 +219,7 @@ impl Consensus {
                 }
                 false
             }
-        };
+        }
     }
 
     fn request_vote(&mut self) {
@@ -227,7 +228,7 @@ impl Consensus {
         self.peer_manager.reset_vote();
         let peer_server_ids = self.peer_manager.peer_server_ids();
         for peer_server_id in peer_server_ids.iter() {
-            let peer = self.peer_manager.peer(peer_server_id.clone()).unwrap();
+            let peer = self.peer_manager.peer(*peer_server_id).unwrap();
             info!("Request vote to {:?}.", &peer.server_addr);
             let request = RequestVoteRequest {
                 term: self.metadata.current_term,
@@ -278,7 +279,6 @@ impl Consensus {
         {
             info!("Become leader.");
             self.become_leader();
-            return;
         }
     }
 
@@ -491,7 +491,6 @@ impl Consensus {
         // Add NOOP log
         if let Err(e) = self.replicate(EntryType::Noop, config::NONE_DATA.as_bytes().to_vec()) {
             error!("Add NOOP entry failed after becoming leader, error: {}", e);
-            return;
         }
     }
 
@@ -658,10 +657,8 @@ impl Consensus {
                     server_addr: self.server_addr.clone(),
                 });
 
-                match self.replicate(EntryType::Configuration, old_new_configuration.to_data()) {
-                    Ok(_) => true,
-                    Err(_) => false,
-                }
+                self.replicate(EntryType::Configuration, old_new_configuration.to_data())
+                    .is_ok()
             }
             // Append new_configuration
             None => {
@@ -678,12 +675,9 @@ impl Consensus {
                             panic!("There is no old_new_configuration before append new configuration.")
                         }
                         let new_configuration = old_new_configuration.gen_new_configuration();
-                        return match self
+                        return self
                             .replicate(EntryType::Configuration, new_configuration.to_data())
-                        {
-                            Ok(_) => true,
-                            Err(_) => false,
-                        };
+                            .is_ok();
                     }
                 }
             }
@@ -904,10 +898,8 @@ impl Consensus {
 
         if request.term > self.metadata.current_term {
             self.step_down(request.term);
-        } else {
-            if self.state == State::Leader || self.state == State::Candidate {
-                return refuse_response;
-            }
+        } else if self.state == State::Leader || self.state == State::Candidate {
+            return refuse_response;
         }
 
         let log_is_ok = request.term > self.log.last_term(self.snapshot.last_included_term)
@@ -1013,10 +1005,10 @@ impl Consensus {
 
         match request.r#type() {
             SnapshotDataType::Metadata => {
-                tmp_metadata_file.write(&request.data).unwrap();
+                tmp_metadata_file.write_all(&request.data).unwrap();
             }
             SnapshotDataType::Snapshot => {
-                tmp_snapshot_file.write(&request.data).unwrap();
+                tmp_snapshot_file.write_all(&request.data).unwrap();
             }
         }
 
@@ -1050,9 +1042,9 @@ impl Consensus {
             self.log.truncate_prefix(self.snapshot.last_included_index);
         }
 
-        return InstallSnapshotResponse {
+        InstallSnapshotResponse {
             term: self.snapshot.last_included_term,
-        };
+        }
     }
 
     pub fn handle_get_leader(&mut self, _request: &GetLeaderRequest) -> GetLeaderResponse {
@@ -1075,8 +1067,7 @@ impl Consensus {
                 };
             }
         }
-        let reply = GetLeaderResponse { leader: None };
-        reply
+        GetLeaderResponse { leader: None }
     }
 
     pub fn handle_get_configuration(
@@ -1095,8 +1086,7 @@ impl Consensus {
             server_addr: self.server_addr.clone(),
         });
 
-        let reply = GetConfigurationResponse { servers };
-        reply
+        GetConfigurationResponse { servers }
     }
 
     pub fn handle_set_configuration(
@@ -1117,7 +1107,6 @@ impl Consensus {
 
         let success = self.append_configuration(Some(request.servers.as_ref()));
 
-        let reply = SetConfigurationResponse { success };
-        reply
+        SetConfigurationResponse { success }
     }
 }

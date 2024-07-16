@@ -2,6 +2,7 @@ use crate::consensus::Consensus;
 use crate::proto;
 use crate::proto::consensus_rpc_client::ConsensusRpcClient;
 use crate::proto::consensus_rpc_server::{ConsensusRpc, ConsensusRpcServer};
+use crate::proto::management_rpc_server::ManagementRpcServer;
 use crate::proto::{
     AppendEntriesRequest, AppendEntriesResponse, GetConfigurationRequest, GetConfigurationResponse,
     GetLeaderRequest, GetLeaderResponse, InstallSnapshotRequest, InstallSnapshotResponse,
@@ -30,7 +31,7 @@ pub async fn start_server(
     };
     tonic::transport::Server::builder()
         .add_service(ConsensusRpcServer::new(consensus_server))
-        .add_service(ConsensusRpcServer::new(management_server))
+        .add_service(ManagementRpcServer::new(management_server))
         .serve(addr)
         .await?;
     Ok(())

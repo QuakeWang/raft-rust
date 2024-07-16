@@ -28,6 +28,12 @@ pub struct PeerManager {
     peers: Vec<Peer>,
 }
 
+impl Default for PeerManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerManager {
     pub fn new() -> Self {
         Self { peers: Vec::new() }
@@ -45,7 +51,7 @@ impl PeerManager {
             if let Some(position) = self
                 .peers
                 .iter()
-                .position(|peer| peer.server_id == server_id.clone())
+                .position(|peer| peer.server_id == server_id)
             {
                 self.peers.remove(position);
             }
@@ -81,10 +87,7 @@ impl PeerManager {
     }
 
     pub fn contains(&self, server_id: u64) -> bool {
-        self.peers
-            .iter()
-            .find(|peer| peer.server_id == server_id)
-            .is_some()
+        self.peers.iter().any(|peer| peer.server_id == server_id)
     }
 
     // Get the most match index
@@ -104,13 +107,12 @@ impl PeerManager {
         }
         new_match_index.sort();
         let new_quorum_match_index = {
-            if new_match_index.len() == 0 {
+            if new_match_index.is_empty() {
                 u64::MAX
             } else {
-                new_match_index
+                *new_match_index
                     .get((new_match_index.len() - 1) / 2)
                     .unwrap()
-                    .clone()
             }
         };
 
@@ -125,13 +127,12 @@ impl PeerManager {
         }
         old_match_index.sort();
         let old_quorum_match_index = {
-            if old_match_index.len() == 0 {
+            if old_match_index.is_empty() {
                 u64::MAX
             } else {
-                old_match_index
+                *old_match_index
                     .get((old_match_index.len() - 1) / 2)
                     .unwrap()
-                    .clone()
             }
         };
 
@@ -174,7 +175,7 @@ impl PeerManager {
             { total_new_servers == 0 || granted_new_servers >= (total_new_servers / 2) };
         let old_server_quorum =
             { total_old_servers == 0 || granted_old_servers >= (total_old_servers / 2) };
-        return new_server_quorum && old_server_quorum;
+        new_server_quorum && old_server_quorum
     }
 }
 

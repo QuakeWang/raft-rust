@@ -1,6 +1,7 @@
 use crate::consensus::Consensus;
 use ::log::error;
 use std::sync::{Arc, Mutex};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 mod config;
 pub mod consensus;
@@ -22,11 +23,14 @@ pub fn start(
     snapshot_dir: String,
     metadata_dir: String,
 ) -> Arc<Mutex<Consensus>> {
-    // TODO: Add config log
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "info");
     }
-    env_logger::init();
+
+    let file_appender = tracing_appender::rolling::hourly("./logs", "application.log");
+    let all_appender = file_appender.and(std::io::stdout);
+
+    tracing_subscriber::fmt().with_writer(all_appender).init();
 
     if !std::path::Path::new(&metadata_dir).exists() {
         if let Err(e) = std::fs::create_dir_all(metadata_dir.clone()) {
@@ -41,19 +45,19 @@ pub fn start(
         }
     }
 
-    let consensus = Consensus::new(
+    let consensus = Arc::new(Mutex::new(Consensus::new(
         server_id,
         port,
         peers,
         state_machine,
         snapshot_dir,
         metadata_dir,
-    );
+    )));
 
     let consensus_clone = consensus.clone();
     std::thread::spawn(move || {
         let addr = format!("[::1]:{}", port);
-        if let Err(_) = rpc::start_server(addr.as_str(), consensus_clone) {
+        if rpc::start_server(addr.as_str(), consensus_clone).is_err() {
             panic!("tonic rpc server started failed.");
         }
     });

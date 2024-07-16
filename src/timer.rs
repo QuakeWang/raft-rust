@@ -38,7 +38,7 @@ impl Timer {
     // Start the timer schedule
     pub fn schedule<F>(&mut self, trigger_interval: Duration, callback: F)
     where
-        F: 'static + Send + Clone + FnMut() -> (),
+        F: 'static + Send + Clone + FnMut(),
     {
         info!(
             "{} start schedule with trigger interval: {}ms",

@@ -23,12 +23,18 @@ pub const SNAPSHOT_LOG_LENGTH_THRESHOLD: usize = 5;
 pub const NONE_SERVER_ID: u64 = 0;
 
 // None data
-pub const NONE_DATA: &'static str = "None";
+pub const NONE_DATA: &str = "None";
 
 #[derive(Debug, PartialEq)]
 pub struct ConfigurationState {
     pub in_new: bool,
     pub in_old: bool,
+}
+
+impl Default for ConfigurationState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConfigurationState {
@@ -49,6 +55,12 @@ pub struct Configuration {
     pub new_servers: Vec<proto::Server>,
 }
 
+impl Default for Configuration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Configuration {
     pub fn new() -> Self {
         Self {
@@ -57,7 +69,7 @@ impl Configuration {
         }
     }
 
-    pub fn from_data(data: &Vec<u8>) -> Self {
+    pub fn from_data(data: &[u8]) -> Self {
         bincode::deserialize(data).expect("Failed to convert Vec<u8> to configuration.")
     }
 
@@ -65,7 +77,7 @@ impl Configuration {
         bincode::serialize(self).expect("Failed to convert configuration to Vec<u8>.")
     }
 
-    pub fn append_new_servers(&mut self, new_servers: &Vec<proto::Server>) {
+    pub fn append_new_servers(&mut self, new_servers: &[proto::Server]) {
         for server in new_servers.iter() {
             self.new_servers.push(server.clone());
         }
@@ -95,13 +107,11 @@ impl Configuration {
             in_new: self
                 .new_servers
                 .iter()
-                .find(|new_server| new_server.server_id == server_id)
-                .is_some(),
+                .any(|new_server| new_server.server_id == server_id),
             in_old: self
                 .old_servers
                 .iter()
-                .find(|old_server| old_server.server_id == server_id)
-                .is_some(),
+                .any(|old_server| old_server.server_id == server_id),
         }
     }
 

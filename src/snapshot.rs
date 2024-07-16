@@ -85,14 +85,14 @@ impl Snapshot {
                 }
             }
         }
-        return if latest_index_term.0 != 0 && latest_index_term.1 != 0 {
+        if latest_index_term.0 != 0 && latest_index_term.1 != 0 {
             Some(format!(
                 "{}/raft-{}-{}.snapshot",
                 &self.snapshot_dir, latest_index_term.0, latest_index_term.1
             ))
         } else {
             None
-        };
+        }
     }
 
     pub fn latest_metadata_filepath(&mut self) -> Option<String> {
@@ -117,14 +117,14 @@ impl Snapshot {
                 }
             }
         }
-        return if latest_index_term.0 != 0 && latest_index_term.1 != 0 {
+        if latest_index_term.0 != 0 && latest_index_term.1 != 0 {
             Some(format!(
                 "{}/raft-{}-{}.snapshot.metadata",
                 &self.snapshot_dir, latest_index_term.0, latest_index_term.1
             ))
         } else {
             None
-        };
+        }
     }
 
     pub fn gen_snapshot_filepath(

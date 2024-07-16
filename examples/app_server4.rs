@@ -6,8 +6,8 @@ struct MyStateMachine {
 }
 
 impl raft_rust::state_machine::StateMachine for MyStateMachine {
-    fn apply(&mut self, data: &Vec<u8>) {
-        self.data.push(data.clone());
+    fn apply(&mut self, data: &[u8]) {
+        self.data.push(Vec::from(data));
     }
 
     fn take_snapshot(&mut self, snapshot_filepath: String) {
@@ -47,11 +47,11 @@ fn main() {
     );
     let consensus = raft_rust::start(4, 9094, peers, state_machine, snapshot_dir, metadata_dir);
 
-    let mut count = 0;
+    let mut _count = 0;
 
     loop {
         std::thread::sleep(std::time::Duration::from_secs(20));
-        count += 1;
+        _count += 1;
 
         let consensus = consensus.lock().unwrap();
         println!("consensus details: {:#?}", consensus);
